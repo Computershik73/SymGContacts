@@ -165,27 +165,27 @@ void SyncThread::executeSync(const QString &accessToken)
 
     QNetworkAccessManager net;
 
-    QNetworkProxy proxy;
+   /* QNetworkProxy proxy;
     proxy.setType(QNetworkProxy::HttpProxy);
     proxy.setHostName("127.0.0.1");
     proxy.setPort(8080);
-    proxy.setCapabilities(QNetworkProxy::TunnelingCapability);
+    proxy.setCapabilities(QNetworkProxy::TunnelingCapability);*/
 
-    net.setProxy(proxy); // СТРОГО навязываем прокси
+   // net.setProxy(proxy); // СТРОГО навязываем прокси
 
     qDebug() << "Proxy set to:" << net.proxy().hostName() << ":" << net.proxy().port();
 
     QNetworkRequest req(QUrl("https://people.googleapis.com/v1/people/me/connections?personFields=names,phoneNumbers&pageSize=1000"));
     req.setRawHeader("Authorization", QString("Bearer " + accessToken).toUtf8());
     req.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, false);
-    QTcpSocket testSocket;
+   /* QTcpSocket testSocket;
     testSocket.connectToHost("127.0.0.1", 8080);
     if (testSocket.waitForConnected(3000)) {
         qDebug() << "DEBUG: Соединение с локальным прокси УСПЕШНО!";
         testSocket.disconnectFromHost();
     } else {
         qDebug() << "DEBUG: Соединение с локальным прокси ПРОВАЛИЛОСЬ!";
-    }
+    }*/
 
     QNetworkReply *reply = net.get(req);
 
