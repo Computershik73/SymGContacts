@@ -1,0 +1,10 @@
+#include <startupitem.rh>
+
+RESOURCE STARTUP_ITEM_INFO startexe
+{
+    // Путь к исполняемому файлу в Symbian
+    executable_name = "!:\\sys\\bin\\GoogleSync.exe";
+
+    // EStartupItemExPolicyNone означает, что если приложение упадет, система не будет пытаться его перезапустить
+    recovery = EStartupItemExPolicyNone;
+}
