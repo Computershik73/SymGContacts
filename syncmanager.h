@@ -6,6 +6,24 @@
 #include <QSettings>
 #include <QStringList>
 #include <QTimer>
+#include <QDesktopServices>
+
+class SyncState {
+public:
+    QMap<QString, QString> etags;
+    QMap<QString, QString> hashes;
+};
+
+struct GDate {
+    int year;
+    int month;
+    int day;
+
+    // Вспомогательный метод для проверки, пустая ли дата (если Google прислал только месяц и день)
+    bool isEmpty() const {
+        return (year == 0 && month == 0 && day == 0);
+    }
+};
 
 // Qt-структура для хранения данных контакта
 struct LocalContact {
@@ -14,7 +32,28 @@ struct LocalContact {
     QString firstName;
     QString lastName;
     QStringList phones;
-    QStringList emails; // <-- Добавить это
+    QStringList emails;
+    QStringList addresses;
+    QStringList urls;
+    QString company;
+    QString jobTitle;
+    QString birthday;
+    QString notes;
+};
+
+struct GoogleContact {
+    QString id;
+    QString etag;
+    QString firstName;
+    QString lastName;
+    QStringList phones;
+    QStringList emails;
+    QStringList addresses;
+    QStringList urls;
+    QString company;
+    QString jobTitle;
+    GDate birthday;
+    QString notes;
 };
 
 class SyncManager;
@@ -30,6 +69,7 @@ public:
     bool doAuthFlow;
     SyncManager *m_parent;
 
+
 private:
     QString syncWait(class QNetworkReply *reply);
     QString getAccessToken(const QString &refreshToken);
@@ -40,18 +80,30 @@ private:
     void readSymbianContacts(QList<LocalContact> &list);
     void saveSymbianContacts(const QList<LocalContact> &toSave);
     void deleteSymbianContacts(const QList<long> &toDelete);
+    QString createGoogleContact(const LocalContact &lc, const QString &accessToken);
+    QString calculateHashLocal(const LocalContact &lc);
+    QString calculateHash(const GoogleContact &gc);
+    void applyGoogleDataToLocal(const GoogleContact &gc, LocalContact &lc);
+    void saveSyncState(const QMap<QString, QString>& etags, const QMap<QString, QString>& hashes);
+    SyncState loadSyncState();
+    void fetchGoogleContacts(const QString &accessToken, QList<GoogleContact> &contactsList);
+    bool deleteGoogleContact(const QString &accessToken, const QString &resourceName);
+    bool updateGoogleContact(const QString &accessToken, const LocalContact &localContact, const QString &etag);
 };
 
 class SyncManager : public QObject
 {
     Q_OBJECT
-friend class SyncThread;
+    friend class SyncThread;
 
 
 public:
     explicit SyncManager(QObject *parent = 0);
     ~SyncManager();
-
+    Q_INVOKABLE bool hasToken() {
+        QSettings settings(QDesktopServices::storageLocation(QDesktopServices::DataLocation) + "/wpgcontacts.ini", QSettings::IniFormat);
+        return !settings.value("refreshToken").toString().isEmpty();
+    }
     Q_INVOKABLE void startAuthAndSync(const QString &clientId, const QString &clientSecret);
 
 public slots:

@@ -4,8 +4,11 @@ Rectangle {
     width: 360
     height: 640
     color: "#001e36" // Глубокий синий (Windows/Metro стиль)
-
+	property bool isLoggedIn: syncManager.hasToken()
+	id: root 
+	
     Column {
+		
         anchors.centerIn: parent
         spacing: 20
         width: parent.width * 0.9
@@ -65,6 +68,7 @@ Rectangle {
         }
 
         Rectangle {
+			visible: !root.isLoggedIn
             id: syncBtn
             width: parent.width
             height: 50
@@ -83,6 +87,29 @@ Rectangle {
                     statusText.text = "Запуск..."
                     // Вызов C++ метода
                     syncManager.startAuthAndSync(clientIdInput.text, clientSecretInput.text);
+                }
+            }
+        }
+		Rectangle {
+			visible: root.isLoggedIn
+            id: syncreadyBtn
+            width: parent.width
+            height: 50
+            color: "#0078D7"
+            radius: 5
+            Text {
+                text: "Синхронизировать"
+                color: "white"
+                font.pixelSize: 18
+                anchors.centerIn: parent
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    syncBtn.opacity = 0.5
+                    statusText.text = "Запуск..."
+                    // Вызов C++ метода
+                    syncManager.startSyncOnly()
                 }
             }
         }
