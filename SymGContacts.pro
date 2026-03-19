@@ -30,6 +30,9 @@ CONFIG += PIPS
 INCLUDEPATH += $$EPOCROOT/epoc32/include/libc
 INCLUDEPATH += $$EPOCROOT/epoc32/include/libc/sys
 
+INCLUDEPATH += $$EPOCROOT/epoc32/include/app
+INCLUDEPATH += $$EPOCROOT/epoc32/include/platform
+
 symbian {
     TARGET.UID3 = 0xE3CB3BE0 # Замените на ваш UID
     #TARGET.CAPABILITY = ReadUserData WriteUserData NetworkServices ReadDeviceData WriteDeviceData
@@ -61,6 +64,8 @@ TARGET.CAPABILITY = NetworkServices
     startup_res.sources = startup.rss
     startup_res.path = /private/101f875a/import/[0xE3CB3BE0].rsc # Имя файла должно совпадать с UID3 без 0x
     DEPLOYMENT += startup_res
+    MMP_RULES += "DEBUGGABLE_UDEBONLY"
+    MMP_RULES += "SRCDBG"
 
 # Please do not modify the following two lines. Required for deployment.
 include(qmlapplicationviewer/qmlapplicationviewer.pri)
