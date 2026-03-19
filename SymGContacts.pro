@@ -32,7 +32,26 @@ INCLUDEPATH += $$EPOCROOT/epoc32/include/libc/sys
 
 symbian {
     TARGET.UID3 = 0xE3CB3BE0 # Замените на ваш UID
-    TARGET.CAPABILITY = ReadUserData WriteUserData NetworkServices ReadDeviceData WriteDeviceData
+    #TARGET.CAPABILITY = ReadUserData WriteUserData NetworkServices ReadDeviceData WriteDeviceData
+TARGET.CAPABILITY = NetworkServices
+    TARGET.CAPABILITY += LocalServices
+    TARGET.CAPABILITY += Location
+    TARGET.CAPABILITY += UserEnvironment
+    TARGET.CAPABILITY += SwEvent
+    TARGET.CAPABILITY +=  SurroundingsDD
+    TARGET.CAPABILITY +=  ProtServ
+    TARGET.CAPABILITY +=  PowerMgmt
+    TARGET.CAPABILITY +=  ReadDeviceData
+    TARGET.CAPABILITY +=  WriteDeviceData
+    TARGET.CAPABILITY +=  TrustedUI
+    TARGET.CAPABILITY +=  NetworkControl
+    TARGET.CAPABILITY +=  MultimediaDD
+    TARGET.CAPABILITY +=  CommDD
+    TARGET.CAPABILITY +=  DiskAdmin
+    #load(data_caging_paths)
+    TARGET.CAPABILITY += ReadUserData
+    TARGET.CAPABILITY += WriteUserData
+
     TARGET.EPOCHEAPSIZE = 0x40000 0x4000000
 
     # Подключаем нативные библиотеки Symbian для работы с контактами

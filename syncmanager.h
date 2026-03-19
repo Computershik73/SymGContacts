@@ -88,9 +88,9 @@ private:
     void SmartSetDateFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aDateStr, const class CPbkFieldsInfo& aFieldsInfo);
 #endif
     // Мосты для нативного Symbian API
-    void readSymbianContacts(QList<LocalContact> &list);
-    void saveSymbianContacts(const QList<LocalContact> &toSave);
-    void deleteSymbianContacts(const QList<long> &toDelete);
+    void readSymbianContacts(QList<LocalContact> &list, class CContactDatabase* aDb);
+    void saveSymbianContacts(const QList<LocalContact> &toSave, class CContactDatabase* aDb);
+    void deleteSymbianContacts(const QList<long> &toDelete, class CContactDatabase* aDb);
     QString createGoogleContact(const LocalContact &lc, const QString &accessToken);
     QString calculateHashLocal(const LocalContact &lc);
     QString calculateHash(const GoogleContact &gc);

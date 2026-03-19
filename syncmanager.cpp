@@ -27,6 +27,8 @@
 #include <QDir>
 #include <app/cntdef.h>    // Для TContactItemAttr и KContactFixed
 #include <app/cntitem.h>   // Для CContactItem
+#include <e32std.h>
+#include <sys/time.h>
 
 // Утилиты для безопасной конвертации QString <-> TDesC (Symbian Strings)
 static TPtrC16 ToSymbianStr(const QString& str) {
@@ -145,8 +147,8 @@ void SyncThread::run()
             return;
         }
     }
-    LocalSslProxy localProxy;
-    localProxy.listen(QHostAddress::LocalHost, 8080);
+   // LocalSslProxy localProxy;
+   // localProxy.listen(QHostAddress::LocalHost, 8080);
     QString refreshToken = settings.value("refreshToken").toString();
     if (refreshToken.isEmpty()) {
         emit m_parent->syncFinished(false, "Нет токена. Требуется авторизация.");
@@ -162,7 +164,7 @@ void SyncThread::run()
 
     // Запускаем основную логику
     executeSync(accessToken);
-    localProxy.close();
+  //  localProxy.close();
 }
 
 QString SyncThread::calculateHashLocal(const LocalContact &lc)
@@ -573,7 +575,20 @@ bool SyncThread::deleteGoogleContact(const QString &accessToken, const QString &
 void SyncThread::executeSync(const QString &accessToken)
 {
     emit m_parent->progressUpdated("Загрузка состояния...");
-
+    //TRAPD(dbErr, {
+    CContactDatabase* db = NULL;
+    TRAPD(openErr, db = CContactDatabase::OpenL());
+    if (openErr == KErrNotFound) {
+        TRAPD(createErr, db = CContactDatabase::CreateL());
+        if (createErr == KErrNotFound) {
+            qDebug() << "Ошибка создания";
+            User::LeaveIfError(createErr);
+        }
+    } else {
+        qDebug() << "Ошибка чтения";
+        User::LeaveIfError(openErr);
+    }
+    CleanupStack::PushL(db);
     // 1. ЗАГРУЖАЕМ "ПАМЯТЬ" (состояние на момент конца прошлой синхронизации)
     SyncState state;
     TRAPD(err_load, state = loadSyncState()); // TRAPD на случай ошибки чтения файла
@@ -600,7 +615,7 @@ void SyncThread::executeSync(const QString &accessToken)
     // 3. ЧИТАЕМ ДАННЫЕ С ТЕЛЕФОНА
     emit m_parent->progressUpdated("Чтение контактов с телефона...");
     QList<LocalContact> existingContacts;
-    readSymbianContacts(existingContacts);
+    readSymbianContacts(existingContacts, db);
 
     int uploadedCount = 0, downloadedCount = 0, localDeletedCount = 0, cloudDeletedCount = 0;
 
@@ -636,7 +651,7 @@ void SyncThread::executeSync(const QString &accessToken)
             localDeletedCount++;
         }
     }
-    if (!toDeleteLocally.isEmpty()) deleteSymbianContacts(toDeleteLocally);
+    if (!toDeleteLocally.isEmpty()) deleteSymbianContacts(toDeleteLocally, db);
 
     // === ФАЗА 3: СИНХРОНИЗАЦИЯ И РАЗРЕШЕНИЕ КОНФЛИКТОВ ===
     for (int i = 0; i < googleContacts.size(); ++i) {
@@ -717,13 +732,20 @@ void SyncThread::executeSync(const QString &accessToken)
 
     // Финальная запись ВСЕХ изменений в телефонную книгу
     emit m_parent->progressUpdated("Сохранение в телефон...");
-    saveSymbianContacts(existingContacts);
-
-    // СОХРАНЯЕМ НОВОЕ СОСТОЯНИЕ ДЛЯ СЛЕДУЮЩЕГО РАЗА
-    emit m_parent->progressUpdated("Сохранение состояния...");
+    saveSymbianContacts(existingContacts, db);
+    CleanupStack::PopAndDestroy(db);
     saveSyncState(newEtags, newHashes);
 
     emit m_parent->syncFinished(true, QString("Готово! Обновлено: %1, Выгружено: %2").arg(downloadedCount).arg(uploadedCount));
+    emit m_parent->progressUpdated("Сохранение состояния...");
+//});
+
+  /*  if (dbErr != KErrNone) {
+        qDebug() << "КРИТИЧЕСКАЯ ОШИБКА CContactDatabase:" << dbErr;
+    }*/
+    // СОХРАНЯЕМ НОВОЕ СОСТОЯНИЕ ДЛЯ СЛЕДУЮЩЕГО РАЗА
+
+
 }
 
 
@@ -833,62 +855,129 @@ bool SyncThread::doDeviceAuthFlow()
 // ИЗОЛИРОВАННЫЕ ВЫЗОВЫ К NATIVE SYMBIAN API (ОБЕРНУТЫ В TRAPD)
 // =======================================================================
 
-void SyncThread::readSymbianContacts(QList<LocalContact> &list)
+void SyncThread::readSymbianContacts(QList<LocalContact> &list, CContactDatabase* aDb)
 {
 #ifdef Q_OS_SYMBIAN
-    TRAPD(err, {
-          CPbkContactEngine* db = CPbkContactEngine::NewL();
-            CleanupStack::PushL(db);
+    qDebug() << "[READ] === СТАРТ ЧТЕНИЯ БАЗЫ SYMBIAN ===";
 
-    CPbkContactIter* iter = CPbkContactIter::NewL(*db);
-    CleanupStack::PushL(iter);
+    TRAPD(dbErr, {
+          qDebug() << "[READ] Открытие CContactDatabase...";
+            //  CContactDatabase* db = NULL;
+            /* TRAPD(openErr, db = CContactDatabase::OpenL());
+            if (openErr == KErrNotFound) {
+                qDebug() << "[READ] База не найдена, создаем новую...";
+                db = CContactDatabase::CreateL();
+            } else {
+                User::LeaveIfError(openErr);
+            }
+            CleanupStack::PushL(db);*/
+
+            qDebug() << "[READ] Создание итератора...";
+    TContactIter iter(*aDb);
+    //CleanupStack::PushL(&iter);
 
     TContactItemId id;
-    while ((id = iter->NextL()) != KNullContactId) {
-        CPbkContactItem* item = db->ReadContactLC(id);
+    for (id = iter.FirstL(); id != KNullContactId; id = iter.NextL()) {
+        TRAPD(itemErr, {
+              qDebug() << "[READ] -------------------------------------";
+                qDebug() << "[READ] Чтение контакта с ID:" << id;
+
+        CContactItem* item = aDb->ReadContactL(id);
+        CleanupStack::PushL(item);
+        if (item->Type() != KUidContactCard) {
+            CleanupStack::PopAndDestroy(item);
+            continue;
+        }
+
         LocalContact lc;
         lc.symbianId = (long)id;
 
-        for (int i = 0; i < item->CardFields().Count(); i++) {
-            TPbkContactItemField& field = item->CardFields()[i];
-            TInt fId = field.FieldInfo().FieldId();
+        CContactItemFieldSet& fieldSet = item->CardFields();
+        qDebug() << "[READ] Найдено полей:" << fieldSet.Count();
 
-            if (fId == EPbkFieldIdFirstName) lc.firstName = ToQString(field.TextStorage()->Text());
-            else if (fId == EPbkFieldIdLastName) lc.lastName = ToQString(field.TextStorage()->Text());
-            else if (fId == EPbkFieldIdCompanyName) lc.company = ToQString(field.TextStorage()->Text());
-            else if (fId == EPbkFieldIdJobTitle) lc.jobTitle = ToQString(field.TextStorage()->Text());
-            else if (fId == EPbkFieldIdPostalAddress) lc.addresses.append(ToQString(field.TextStorage()->Text()));
-            else if (fId == EPbkFieldIdURL) lc.urls.append(ToQString(field.TextStorage()->Text()));
-            else if (fId == EPbkFieldIdEmailAddress) lc.emails.append(ToQString(field.TextStorage()->Text()));
-            else if (fId == EPbkFieldIdPhoneNumberGeneral || fId == EPbkFieldIdPhoneNumberMobile ||
-                     fId == EPbkFieldIdPhoneNumberHome || fId == EPbkFieldIdPhoneNumberWork) {
-                lc.phones.append(ToQString(field.TextStorage()->Text()));
+        for (int k = 0; k < fieldSet.Count(); ++k) {
+            CContactItemField& field = fieldSet[k];
+
+            // ГЕНИАЛЬНЫЙ ХАК GAMMU: Вызываем методы цепочкой, избегая CContentType&
+            if (field.ContentType().ContainsFieldType(KUidContactFieldGivenName)) {
+                lc.firstName = ToQString(field.TextStorage()->Text());
+                qDebug() << "[READ] Имя:" << lc.firstName;
             }
-            else if (fId == EPbkFieldIdDate) {
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldFamilyName)) {
+                lc.lastName = ToQString(field.TextStorage()->Text());
+                qDebug() << "[READ] Фамилия:" << lc.lastName;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldPhoneNumber)) {
+                QString phone = ToQString(field.TextStorage()->Text());
+                lc.phones.append(phone);
+                qDebug() << "[READ] Телефон:" << phone;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldEMail)) {
+                QString email = ToQString(field.TextStorage()->Text());
+                lc.emails.append(email);
+                qDebug() << "[READ] Email:" << email;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldPostOffice)) {
+                QString addr = ToQString(field.TextStorage()->Text());
+                lc.addresses.append(addr);
+                qDebug() << "[READ] Адрес:" << addr;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldUrl)) {
+                QString url = ToQString(field.TextStorage()->Text());
+                lc.urls.append(url);
+                qDebug() << "[READ] URL:" << url;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldCompanyName)) {
+                lc.company = ToQString(field.TextStorage()->Text());
+                qDebug() << "[READ] Компания:" << lc.company;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldJobTitle)) {
+                lc.jobTitle = ToQString(field.TextStorage()->Text());
+                qDebug() << "[READ] Должность:" << lc.jobTitle;
+            }
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldBirthday)) {
                 TTime time = field.DateTimeStorage()->Time();
                 TDateTime dt = time.DateTime();
-                // Формируем строку YYYY-MM-DD
                 lc.birthday = QString("%1-%2-%3")
                         .arg(dt.Year())
                         .arg(dt.Month() + 1, 2, 10, QChar('0'))
                         .arg(dt.Day() + 1, 2, 10, QChar('0'));
+                qDebug() << "[READ] День рождения:" << lc.birthday;
             }
-            else if (fId == EPbkFieldIdNote) {
+            else if (field.ContentType().ContainsFieldType(KUidContactFieldNote)) {
                 QString noteText = ToQString(field.TextStorage()->Text());
                 int start = noteText.indexOf("[GID:");
                 if (start != -1) {
                     int end = noteText.indexOf("]", start);
-                    if (end != -1) lc.remoteId = noteText.mid(start + 5, end - start - 5);
+                    if (end != -1) {
+                        lc.remoteId = noteText.mid(start + 5, end - start - 5);
+                        qDebug() << "[READ] Скрытый Google ID:" << lc.remoteId;
+                    }
                 } else {
                     lc.notes = noteText;
+                    qDebug() << "[READ] Заметка:" << lc.notes;
                 }
             }
         }
+
         list.append(lc);
         CleanupStack::PopAndDestroy(item);
+        qDebug() << "[READ] Контакт успешно прочитан.";
+    });
+
+    if (itemErr != KErrNone) {
+        qDebug() << "[READ] [ОШИБКА] Сбой чтения контакта ID" << id << "Код:" << itemErr;
     }
-    CleanupStack::PopAndDestroy(2, db); // iter, db
+}
+
+//CleanupStack::PopAndDestroy(1);
+//CleanupStack::PopAndDestroy(db);
+qDebug() << "[READ] === ЧТЕНИЕ УСПЕШНО ЗАВЕРШЕНО ===";
 });
+
+if (dbErr != KErrNone) {
+    qDebug() << "[READ] [КРИТИЧЕСКАЯ ОШИБКА] Сбой базы контактов:" << dbErr;
+}
 #endif
 }
 
@@ -1001,91 +1090,250 @@ void SyncThread::SetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStr
 // ГЛАВНАЯ ФУНКЦИЯ СОХРАНЕНИЯ
 // =======================================================================
 
-void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave)
+void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContactDatabase* aDb)
 {
 #ifdef Q_OS_SYMBIAN
+    qDebug() << "[SAVE] === СТАРТ ЗАПИСИ БАЗЫ SYMBIAN ===";
+    /*TRAPD(dbErr, {
+          qDebug() << "[SAVE] Открытие CContactDatabase...";
+            CContactDatabase* db = NULL;
+    TRAPD(openErr, db = CContactDatabase::OpenL());
+    if (openErr == KErrNotFound) {
+        db = CContactDatabase::CreateL();
+    } else {
+        User::LeaveIfError(openErr);
+    }
+    CleanupStack::PushL(db);*/
+
     for (int i = 0; i < toSave.size(); ++i) {
+        const LocalContact &lc = toSave[i];
 
-        TRAPD(itemErr, {
-            CPbkContactEngine* db = CPbkContactEngine::NewL();
-            CleanupStack::PushL(db);
-            const CPbkFieldsInfo& fieldsInfo = db->FieldsInfo();
+        qDebug() << "[SAVE] -------------------------------------";
+        qDebug() << "[SAVE] Обработка контакта:" << lc.firstName << lc.lastName << "(ID:" << lc.symbianId << ")";
 
-            const LocalContact &lc = toSave[i];
+        if (lc.symbianId == 1 || lc.symbianId == 2) {
+            qDebug() << "[SAVE] Пропуск системного контакта (SIM).";
+            continue;
+        }
+        TInt itemErr = KErrNone;
+        TRAP(itemErr, {
+              CContactItem* item = NULL;
+                bool isNew = (lc.symbianId == 0);
 
-            // Пропуск служебных контактов SIM-карты (обычно ID 1 и 2)
-            if (lc.symbianId == 1 || lc.symbianId == 2) {
-                CleanupStack::PopAndDestroy(db);
+        if (isNew) {
+            qDebug() << "[SAVE] Создание новой пустой карточки CContactCard...";
+            item = CContactCard::NewLC();
+        } else {
+            qDebug() << "[SAVE] Чтение существующей карточки из БД...";
+            item = aDb->ReadContactL((TContactItemId)lc.symbianId);
+            CleanupStack::PushL(item);
+        }
+
+        CContactItemFieldSet& fieldSet = item->CardFields();
+
+        // 1. ОЧИСТКА МНОЖЕСТВЕННЫХ ПОЛЕЙ
+        qDebug() << "[SAVE] Очистка старых списочных полей...";
+        if (!isNew) {
+            for (int k = fieldSet.Count() - 1; k >= 0; --k) {
+                CContactItemField& field = fieldSet[k];
+                if (field.ContentType().ContainsFieldType(KUidContactFieldPhoneNumber) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldEMail) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldPostOffice) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldUrl) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldBirthday) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldNote) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldCompanyName) ||
+                        field.ContentType().ContainsFieldType(KUidContactFieldJobTitle))
+                {
+                    item->RemoveField(k);
+                }
+            }
+        }
+
+        // 2. ИМЯ (Given Name)
+        qDebug() << "[SAVE] Применение Имени...";
+        int fnIdx = -1;
+        for (int k = 0; k < fieldSet.Count(); ++k) {
+            if (fieldSet[k].ContentType().ContainsFieldType(KUidContactFieldGivenName)) { fnIdx = k; break; }
+        }
+        if (fnIdx != -1) {
+            fieldSet[fnIdx].TextStorage()->SetTextL(ToSymbianStr(lc.firstName));
+        } else if (!lc.firstName.isEmpty()) {
+            CContactItemField* fnField = CContactItemField::NewL(KStorageTypeText);
+            fnField->AddFieldTypeL(KUidContactFieldGivenName);
+            fnField->SetMapping(KUidContactFieldVCardMapUnusedN);
+            fnField->TextStorage()->SetTextL(ToSymbianStr(lc.firstName));
+            item->AddFieldL(*fnField);
+            //CleanupStack::PopAndDestroy(fnField);
+        }
+
+        // 3. ФАМИЛИЯ (Family Name)
+        qDebug() << "[SAVE] Применение Фамилии...";
+        int lnIdx = -1;
+        for (int k = 0; k < fieldSet.Count(); ++k) {
+            if (fieldSet[k].ContentType().ContainsFieldType(KUidContactFieldFamilyName)) { lnIdx = k; break; }
+        }
+        if (lnIdx != -1) {
+            fieldSet[lnIdx].TextStorage()->SetTextL(ToSymbianStr(lc.lastName));
+        } else if (!lc.lastName.isEmpty()) {
+            CContactItemField* lnField = CContactItemField::NewL(KStorageTypeText);
+            lnField->AddFieldTypeL(KUidContactFieldFamilyName);
+            lnField->SetMapping(KUidContactFieldVCardMapUnusedN);
+            lnField->TextStorage()->SetTextL(ToSymbianStr(lc.lastName));
+            item->AddFieldL(*lnField);
+            //CleanupStack::PopAndDestroy(lnField);
+        }
+
+        // 4. ТЕЛЕФОНЫ
+        qDebug() << "[SAVE] Добавление Телефонов (Кол-во: " << lc.phones.size() << ")...";
+        for (int p = 0; p < lc.phones.size(); ++p) {
+            CContactItemField* phone = CContactItemField::NewL(KStorageTypeText);
+            phone->AddFieldTypeL(KUidContactFieldPhoneNumber);
+            phone->SetMapping(KUidContactFieldVCardMapTEL);
+            phone->TextStorage()->SetTextL(ToSymbianStr(lc.phones[p]));
+            item->AddFieldL(*phone);
+            //CleanupStack::PopAndDestroy(phone);
+        }
+
+        // 5. EMAIL
+        qDebug() << "[SAVE] Добавление Email (Кол-во: " << lc.emails.size() << ")...";
+        for (int e = 0; e < lc.emails.size(); ++e) {
+            CContactItemField* email = CContactItemField::NewL(KStorageTypeText);
+            email->AddFieldTypeL(KUidContactFieldEMail);
+            email->SetMapping(KUidContactFieldVCardMapEMAILINTERNET);
+            email->TextStorage()->SetTextL(ToSymbianStr(lc.emails[e]));
+            item->AddFieldL(*email);
+            //CleanupStack::PopAndDestroy(email);
+        }
+
+        // 6. АДРЕСА
+        qDebug() << "[SAVE] Добавление Адресов (Кол-во: " << lc.addresses.size() << ")...";
+        for (int a = 0; a < lc.addresses.size(); ++a) {
+            CContactItemField* addr = CContactItemField::NewL(KStorageTypeText);
+            addr->AddFieldTypeL(KUidContactFieldPostOffice);
+            addr->SetMapping(KUidContactFieldVCardMapADR);
+            addr->TextStorage()->SetTextL(ToSymbianStr(lc.addresses[a]));
+            item->AddFieldL(*addr);
+            //CleanupStack::PopAndDestroy(addr);
+        }
+
+        // 7. URL
+        qDebug() << "[SAVE] Добавление URL (Кол-во: " << lc.urls.size() << ")...";
+        for (int u = 0; u < lc.urls.size(); ++u) {
+            CContactItemField* urlField = CContactItemField::NewL(KStorageTypeText);
+            urlField->AddFieldTypeL(KUidContactFieldUrl);
+            urlField->SetMapping(KUidContactFieldVCardMapURL);
+            urlField->TextStorage()->SetTextL(ToSymbianStr(lc.urls[u]));
+            item->AddFieldL(*urlField);
+            //CleanupStack::PopAndDestroy(urlField);
+        }
+
+        // 8. КОМПАНИЯ И ДОЛЖНОСТЬ
+        qDebug() << "[SAVE] Добавление Организации...";
+        if (!lc.company.isEmpty()) {
+            CContactItemField* comp = CContactItemField::NewL(KStorageTypeText);
+            comp->AddFieldTypeL(KUidContactFieldCompanyName);
+            comp->SetMapping(KUidContactFieldVCardMapORG);
+            comp->TextStorage()->SetTextL(ToSymbianStr(lc.company));
+            item->AddFieldL(*comp);
+            //CleanupStack::PopAndDestroy(comp);
+        }
+        if (!lc.jobTitle.isEmpty()) {
+            CContactItemField* job = CContactItemField::NewL(KStorageTypeText);
+            job->AddFieldTypeL(KUidContactFieldJobTitle);
+            job->SetMapping(KUidContactFieldVCardMapTITLE);
+            job->TextStorage()->SetTextL(ToSymbianStr(lc.jobTitle));
+            item->AddFieldL(*job);
+            //CleanupStack::PopAndDestroy(job);
+        }
+
+        // 9. ЗАМЕТКИ (RemoteID)
+        qDebug() << "[SAVE] Добавление Заметок и RemoteID...";
+        QString noteTag = QString("[GID:%1]").arg(lc.remoteId);
+        QString noteText = lc.notes;
+        QString fullNote = noteTag + "\n" + noteText;
+
+        // И перед вызовом добавления поля:
+        if (fullNote.length() > 255) fullNote = fullNote.left(255);
+
+        CContactItemField* noteField = CContactItemField::NewL(KStorageTypeText);
+        noteField->AddFieldTypeL(KUidContactFieldNote);
+        noteField->SetMapping(KUidContactFieldVCardMapNOTE);
+        noteField->TextStorage()->SetTextL(ToSymbianStr(fullNote));
+        item->AddFieldL(*noteField);
+        //CleanupStack::PopAndDestroy(noteField);
+
+        // 10. ДЕНЬ РОЖДЕНИЯ
+        qDebug() << "[SAVE] Добавление Дня рождения...";
+        if (!lc.birthday.isEmpty()) {
+            QStringList parts = lc.birthday.split("-");
+            if (parts.size() == 3) {
+                TDateTime dt(parts[0].toInt(), (TMonth)(parts[1].toInt() - 1), parts[2].toInt() - 1, 0, 0, 0, 0);
+                TTime time(dt);
+                CContactItemField* bdayField = CContactItemField::NewL(KStorageTypeDateTime);
+                bdayField->AddFieldTypeL(KUidContactFieldBirthday);
+                bdayField->SetMapping(KUidContactFieldVCardMapBDAY);
+                bdayField->DateTimeStorage()->SetTime(time);
+                item->AddFieldL(*bdayField);
+                //CleanupStack::PopAndDestroy(bdayField);
+            }
+        }
+
+        // --- СОХРАНЕНИЕ ---
+        if (isNew) {
+            qDebug() << "[SAVE] Запись нового контакта в базу (AddNewContactL)...";
+            aDb->AddNewContactL(*item);
+        } else {
+            qDebug() << "[SAVE] Запись изменений в базу (CommitContactL)...";
+            if (item == NULL) {
+                qDebug() << "[SAVE] ОШИБКА: item == NULL перед Commit!";
                 continue;
             }
-
-            CPbkContactItem* item = NULL;
-            bool isNew = (lc.symbianId == 0);
-
-            if (isNew) {
-                item = db->CreateEmptyContactL();
-                CleanupStack::PushL(item);
-            } else {
-                item = db->ReadContactLC((TContactItemId)lc.symbianId);
-            }
-
-            // --- ОБНОВЛЕНИЕ ОДИНОЧНЫХ ПОЛЕЙ ПО МЕСТУ ---
-            SmartSetSingleFieldL(item, EPbkFieldIdFirstName, lc.firstName, fieldsInfo);
-            SmartSetSingleFieldL(item, EPbkFieldIdLastName, lc.lastName, fieldsInfo);
-            SmartSetSingleFieldL(item, EPbkFieldIdCompanyName, lc.company, fieldsInfo);
-            SmartSetSingleFieldL(item, EPbkFieldIdJobTitle, lc.jobTitle, fieldsInfo);
-
-            // Скрытый RemoteId и оригинальная заметка
-            QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
-            SmartSetSingleFieldL(item, EPbkFieldIdNote, fullNote, fieldsInfo);
-
-            // --- ОБНОВЛЕНИЕ МНОЖЕСТВЕННЫХ ПОЛЕЙ (Списки) ---
-            SmartSetMultiFieldL(item, EPbkFieldIdPhoneNumberGeneral, lc.phones, fieldsInfo);
-            SmartSetMultiFieldL(item, EPbkFieldIdEmailAddress, lc.emails, fieldsInfo);
-            SmartSetMultiFieldL(item, EPbkFieldIdPostalAddress, lc.addresses, fieldsInfo);
-            SmartSetMultiFieldL(item, EPbkFieldIdURL, lc.urls, fieldsInfo);
-
-            // --- ОБНОВЛЕНИЕ ДАТЫ ---
-            SmartSetDateFieldL(item, EPbkFieldIdDate, lc.birthday, fieldsInfo);
-
-            // --- СОХРАНЕНИЕ ---
-            if (isNew) {
-                db->AddNewContactL(*item);
-            } else {
-                db->CommitContactL(*item);
-            }
-
-            CleanupStack::PopAndDestroy(item);
-            CleanupStack::PopAndDestroy(db);
-
-            // ПАУЗА: дает базе данных Symbian время закрыть дескрипторы файла
-            User::After(50000);
-        });
-
-        if (itemErr != KErrNone) {
-            qDebug() << "Ошибка при сохранении контакта:" << toSave[i].firstName << "Код:" << itemErr;
+            qDebug() << "[SAVE] Попытка Commit для контакта с ID:" << lc.symbianId;
+            aDb->CommitContactL(*item);
         }
+
+        CleanupStack::PopAndDestroy(item);
+        qDebug() << "[SAVE] Контакт успешно сохранен!";
+    });
+
+
+
+    if (itemErr != KErrNone) {
+        qDebug() << "[SAVE] [ОШИБКА] Сбой при сохранении контакта" << lc.firstName << "Код:" << itemErr;
     }
+
+    // Даем базе Symbian 20мс на сброс файловых буферов
+    User::After(20000);
+}
+
+//CleanupStack::PopAndDestroy(db);
+qDebug() << "[SAVE] === ЗАПИСЬ УСПЕШНО ЗАВЕРШЕНА ===";
+//});
+
+/*if (dbErr != KErrNone) {
+    qDebug() << "[SAVE][КРИТИЧЕСКАЯ ОШИБКА] Сбой CContactDatabase:" << dbErr;
+}*/
 #endif
 }
 
-void SyncThread::deleteSymbianContacts(const QList<long> &toDelete)
+void SyncThread::deleteSymbianContacts(const QList<long> &toDelete, CContactDatabase *aDb)
 {
 #ifdef Q_OS_SYMBIAN
-    TRAPD(err, {
+    /*TRAPD(err, {
           CPbkContactEngine* db = CPbkContactEngine::NewL();
-            CleanupStack::PushL(db);
+            CleanupStack::PushL(db);*/
 
     for (int i = 0; i < toDelete.size(); ++i) {
         // Удаляем контакт по его Symbian ID
-        TRAPD(delErr, db->DeleteContactL((TContactItemId)toDelete[i]));
+        TRAPD(delErr, aDb->DeleteContactL((TContactItemId)toDelete[i]));
         if (delErr != KErrNone && delErr != KErrNotFound) {
             // Игнорируем KErrNotFound (если контакт уже был удален пользователем)
         }
     }
 
-    CleanupStack::PopAndDestroy(db);
-});
+  //  CleanupStack::PopAndDestroy(db);
+//});
 #endif
 }
 
