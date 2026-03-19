@@ -7,6 +7,9 @@
 #include <QStringList>
 #include <QTimer>
 #include <QDesktopServices>
+#ifdef Q_OS_SYMBIAN
+#include <e32std.h> // Базовые типы Symbian (TInt, TDesC и т.д.)
+#endif
 
 class SyncState {
 public:
@@ -75,7 +78,15 @@ private:
     QString getAccessToken(const QString &refreshToken);
     bool doDeviceAuthFlow();
     void executeSync(const QString &accessToken);
-
+#ifdef Q_OS_SYMBIAN
+    // Хелперы для работы с контактами Symbian
+    void SetSingleFieldL(class CPbkContactItem* aItem, int aFieldId, const TDesC& aValue, const class CPbkFieldsInfo& aFieldsInfo);
+    void SetMultiFieldL(class CPbkContactItem* aItem, int aFieldId, const QStringList& aValues, const class CPbkFieldsInfo& aFieldsInfo);
+    void SetDateFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aDateStr, const class CPbkFieldsInfo& aFieldsInfo);
+    void SmartSetSingleFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aValue, const class CPbkFieldsInfo& aFieldsInfo);
+    void SmartSetMultiFieldL(class CPbkContactItem* aItem, int aFieldId, const QStringList& aValues, const class CPbkFieldsInfo& aFieldsInfo);
+    void SmartSetDateFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aDateStr, const class CPbkFieldsInfo& aFieldsInfo);
+#endif
     // Мосты для нативного Symbian API
     void readSymbianContacts(QList<LocalContact> &list);
     void saveSymbianContacts(const QList<LocalContact> &toSave);

@@ -25,6 +25,8 @@
 #include <QFile>
 #include <QBuffer>
 #include <QDir>
+#include <app/cntdef.h>    // Для TContactItemAttr и KContactFixed
+#include <app/cntitem.h>   // Для CContactItem
 
 // Утилиты для безопасной конвертации QString <-> TDesC (Symbian Strings)
 static TPtrC16 ToSymbianStr(const QString& str) {
@@ -257,6 +259,105 @@ SyncState SyncThread::loadSyncState()
         file.close();
     }
     return state;
+}
+
+// =======================================================================
+// УМНЫЕ ХЕЛПЕРЫ ДЛЯ РЕДАКТИРОВАНИЯ ПОЛЕЙ "ПО МЕСТУ"
+// =======================================================================
+
+void SyncThread::SmartSetSingleFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aValue, const CPbkFieldsInfo& aFieldsInfo)
+{
+    TPbkContactItemField* field = aItem->FindField(aFieldId);
+
+    if (aValue.isEmpty()) {
+        // Если из Google пришла пустота, а поле есть - удаляем его
+        if (field) {
+            for (int k = 0; k < aItem->CardFields().Count(); ++k) {
+                if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
+                    aItem->RemoveField(k);
+                    break;
+                }
+            }
+        }
+    } else {
+        // Обновляем текст, если поле есть, или создаем новое
+        if (field) {
+            field->TextStorage()->SetTextL(ToSymbianStr(aValue));
+        } else {
+            CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+            if (info) aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValue));
+        }
+    }
+}
+
+void SyncThread::SmartSetMultiFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStringList& aValues, const CPbkFieldsInfo& aFieldsInfo)
+{
+    // 1. Собираем индексы всех существующих полей данного типа в контакте
+    QList<int> existingIndices;
+    for (int k = 0; k < aItem->CardFields().Count(); ++k) {
+        if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
+            existingIndices.append(k);
+        }
+    }
+
+    int googleCount = aValues.size();
+    int symbianCount = existingIndices.size();
+
+    // 2. ОБНОВЛЯЕМ существующие пересекающиеся поля
+    int minCount = qMin(googleCount, symbianCount);
+    for (int i = 0; i < minCount; ++i) {
+        aItem->CardFields()[existingIndices[i]].TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
+    }
+
+    // 3. ДОБАВЛЯЕМ новые поля, если в Google их больше
+    if (googleCount > symbianCount) {
+        CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+        if (info) {
+            for (int i = symbianCount; i < googleCount; ++i) {
+                if (!aValues[i].isEmpty()) {
+                    aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
+                }
+            }
+        }
+    }
+
+    // 4. УДАЛЯЕМ лишние поля с конца, если в Google их стало меньше
+    // ВАЖНО: Удалять элементы из массива нужно строго с конца (с максимального индекса),
+    // чтобы индексы остальных элементов не "съехали".
+    if (symbianCount > googleCount) {
+        for (int i = symbianCount - 1; i >= googleCount; --i) {
+            aItem->RemoveField(existingIndices[i]);
+        }
+    }
+}
+
+void SyncThread::SmartSetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aDateStr, const CPbkFieldsInfo& aFieldsInfo)
+{
+    TPbkContactItemField* field = aItem->FindField(aFieldId);
+
+    if (aDateStr.isEmpty()) {
+        if (field) {
+            for (int k = 0; k < aItem->CardFields().Count(); ++k) {
+                if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
+                    aItem->RemoveField(k);
+                    break;
+                }
+            }
+        }
+    } else {
+        QStringList parts = aDateStr.split("-");
+        if (parts.size() == 3) {
+            TDateTime dt(parts[0].toInt(), (TMonth)(parts[1].toInt() - 1), parts[2].toInt() - 1, 0, 0, 0, 0);
+            TTime time(dt);
+
+            if (field) {
+                field->DateTimeStorage()->SetTime(time);
+            } else {
+                CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+                if (info) aItem->AddFieldL(*info).DateTimeStorage()->SetTime(time);
+            }
+        }
+    }
 }
 
 void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleContact> &contactsList)
@@ -833,117 +934,142 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
     return root.property("resourceName").toString();
 }
 
+
+
+// =======================================================================
+// УНИВЕРСАЛЬНЫЕ ХЕЛПЕРЫ ДЛЯ ЗАПИСИ ПОЛЕЙ В SYMBIAN
+// =======================================================================
+
+void SyncThread::SetSingleFieldL(CPbkContactItem* aItem, TInt aFieldId, const TDesC& aValue, const CPbkFieldsInfo& aFieldsInfo)
+{
+    if (aValue.Length() == 0) return;
+
+    TPbkContactItemField* field = aItem->FindField(aFieldId);
+    if (field) {
+        field->TextStorage()->SetTextL(aValue);
+    } else {
+        CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+        if (info) {
+            aItem->AddFieldL(*info).TextStorage()->SetTextL(aValue);
+        }
+    }
+}
+
+void SyncThread::SetMultiFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStringList& aValues, const CPbkFieldsInfo& aFieldsInfo)
+{
+    // 1. Очищаем все старые поля этого типа, чтобы избежать ошибки -14 и дублей
+    for (int k = aItem->CardFields().Count() - 1; k >= 0; --k) {
+        if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
+            aItem->RemoveField(k);
+        }
+    }
+
+    // 2. Добавляем новые из списка
+    CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+    if (info) {
+        for (int i = 0; i < aValues.size(); ++i) {
+            if (!aValues[i].isEmpty()) {
+                aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
+            }
+        }
+    }
+}
+
+void SyncThread::SetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aDateStr, const CPbkFieldsInfo& aFieldsInfo)
+{
+    if (aDateStr.isEmpty()) return;
+
+    QStringList parts = aDateStr.split("-");
+    if (parts.size() == 3) {
+        // Symbian использует месяцы 0-11 и дни 0-30
+        TDateTime dt(parts[0].toInt(), (TMonth)(parts[1].toInt() - 1), parts[2].toInt() - 1, 0, 0, 0, 0);
+        TTime time(dt);
+
+        TPbkContactItemField* field = aItem->FindField(aFieldId);
+        if (field) {
+            field->DateTimeStorage()->SetTime(time);
+        } else {
+            CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
+            if (info) {
+                aItem->AddFieldL(*info).DateTimeStorage()->SetTime(time);
+            }
+        }
+    }
+}
+
+// =======================================================================
+// ГЛАВНАЯ ФУНКЦИЯ СОХРАНЕНИЯ
+// =======================================================================
+
 void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave)
 {
 #ifdef Q_OS_SYMBIAN
-    TRAPD(dbErr, {
-          CPbkContactEngine* db = CPbkContactEngine::NewL();
-            CleanupStack::PushL(db);
-    const CPbkFieldsInfo& fieldsInfo = db->FieldsInfo();
-
     for (int i = 0; i < toSave.size(); ++i) {
-        // Внутренний TRAPD: если один контакт сломается (например SIM), остальные сохранятся!
+
         TRAPD(itemErr, {
-              const LocalContact &lc = toSave[i];
-                CPbkContactItem* item = NULL;
-        bool isNew = (lc.symbianId == 0);
+            CPbkContactEngine* db = CPbkContactEngine::NewL();
+            CleanupStack::PushL(db);
+            const CPbkFieldsInfo& fieldsInfo = db->FieldsInfo();
 
-        if (isNew) {
-            item = db->CreateEmptyContactL();
-        } else {
-            item = db->ReadContactLC((TContactItemId)lc.symbianId);
-            CleanupStack::Pop(item); // Вынимаем, чтобы вручную положить ниже
-        }
-        CleanupStack::PushL(item);
+            const LocalContact &lc = toSave[i];
 
-        // 1. ОЧИСТКА СТАРЫХ ПОЛЕЙ (кроме имени), ЧТОБЫ ИЗБЕЖАТЬ ДУБЛИКАТОВ
-        if (!isNew) {
-            for (int k = item->CardFields().Count() - 1; k >= 0; --k) {
-                TInt fId = item->CardFields()[k].FieldInfo().FieldId();
-                if (fId == EPbkFieldIdPhoneNumberMobile || fId == EPbkFieldIdPhoneNumberGeneral ||
-                        fId == EPbkFieldIdEmailAddress || fId == EPbkFieldIdPostalAddress ||
-                        fId == EPbkFieldIdURL || fId == EPbkFieldIdCompanyName ||
-                        fId == EPbkFieldIdJobTitle || fId == EPbkFieldIdDate || fId == EPbkFieldIdNote) {
-                    item->RemoveField(k);
-                }
+            // Пропуск служебных контактов SIM-карты (обычно ID 1 и 2)
+            if (lc.symbianId == 1 || lc.symbianId == 2) {
+                CleanupStack::PopAndDestroy(db);
+                continue;
             }
-        }
 
-        // 2. ЗАПИСЬ НОВЫХ ДАННЫХ
-        // Имя
-        TPbkContactItemField* fnField = item->FindField(EPbkFieldIdFirstName);
-        if (!fnField) { CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdFirstName); if (i) fnField = &(item->AddFieldL(*i)); }
-        if (fnField) fnField->TextStorage()->SetTextL(ToSymbianStr(lc.firstName));
+            CPbkContactItem* item = NULL;
+            bool isNew = (lc.symbianId == 0);
 
-        // Фамилия
-        TPbkContactItemField* lnField = item->FindField(EPbkFieldIdLastName);
-        if (!lnField) { CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdLastName); if (i) lnField = &(item->AddFieldL(*i)); }
-        if (lnField) lnField->TextStorage()->SetTextL(ToSymbianStr(lc.lastName));
-
-        // Массивы (Телефоны, Email, Адреса, URL)
-        for (int p = 0; p < lc.phones.size(); ++p) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdPhoneNumberMobile);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.phones[p]));
-        }
-        for (int e = 0; e < lc.emails.size(); ++e) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdEmailAddress);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.emails[e]));
-        }
-        for (int a = 0; a < lc.addresses.size(); ++a) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdPostalAddress);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.addresses[a]));
-        }
-        for (int u = 0; u < lc.urls.size(); ++u) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdURL);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.urls[u]));
-        }
-
-        // Организация
-        if (!lc.company.isEmpty()) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdCompanyName);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.company));
-        }
-        if (!lc.jobTitle.isEmpty()) {
-            CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdJobTitle);
-            if (i) item->AddFieldL(*i).TextStorage()->SetTextL(ToSymbianStr(lc.jobTitle));
-        }
-
-        // День рождения
-        if (!lc.birthday.isEmpty()) {
-            QStringList parts = lc.birthday.split("-");
-            if (parts.size() == 3) {
-                int year = parts[0].toInt();
-                int month = parts[1].toInt();
-                int day = parts[2].toInt();
-
-                TDateTime dt(year, (TMonth)(month - 1), day - 1, 0, 0, 0, 0);
-                TTime time(dt);
-
-                CPbkFieldInfo* i = fieldsInfo.Find(EPbkFieldIdDate);
-                if (i) {
-                    item->AddFieldL(*i).DateTimeStorage()->SetTime(time);
-                }
+            if (isNew) {
+                item = db->CreateEmptyContactL();
+                CleanupStack::PushL(item);
+            } else {
+                item = db->ReadContactLC((TContactItemId)lc.symbianId);
             }
+
+            // Защита от записи в readonly контакты (0x00000002 это KContactFixed)
+
+
+            // --- ИСПОЛЬЗУЕМ ХЕЛПЕРЫ ДЛЯ АБСОЛЮТНО ВСЕХ ПОЛЕЙ ---
+
+            // 1. Одиночные текстовые поля
+            SetSingleFieldL(item, EPbkFieldIdFirstName, ToSymbianStr(lc.firstName), fieldsInfo);
+            SetSingleFieldL(item, EPbkFieldIdLastName, ToSymbianStr(lc.lastName), fieldsInfo);
+            SetSingleFieldL(item, EPbkFieldIdCompanyName, ToSymbianStr(lc.company), fieldsInfo);
+            SetSingleFieldL(item, EPbkFieldIdJobTitle, ToSymbianStr(lc.jobTitle), fieldsInfo);
+
+            QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
+            SetSingleFieldL(item, EPbkFieldIdNote, ToSymbianStr(fullNote), fieldsInfo);
+
+            // 2. Множественные поля (Списки)
+            SetMultiFieldL(item, EPbkFieldIdPhoneNumberGeneral, lc.phones, fieldsInfo);
+            SetMultiFieldL(item, EPbkFieldIdEmailAddress, lc.emails, fieldsInfo);
+            SetMultiFieldL(item, EPbkFieldIdPostalAddress, lc.addresses, fieldsInfo);
+            SetMultiFieldL(item, EPbkFieldIdURL, lc.urls, fieldsInfo);
+
+            // 3. Поле с датой
+            SetDateFieldL(item, EPbkFieldIdDate, lc.birthday, fieldsInfo);
+
+            // --- ФИНАЛ ---
+            if (isNew) {
+                db->AddNewContactL(*item);
+            } else {
+                db->CommitContactL(*item);
+            }
+
+            CleanupStack::PopAndDestroy(item);
+            CleanupStack::PopAndDestroy(db);
+
+            // ПАУЗА: Спасает от ошибки -21 (Access Denied) между контактами
+            User::After(50000);
+        });
+
+        if (itemErr != KErrNone) {
+            qDebug() << "Ошибка при сохранении контакта:" << toSave[i].firstName << "Код:" << itemErr;
         }
-
-        // Заметки (Google ID + Оригинальная заметка)
-        QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
-        CPbkFieldInfo* iNote = fieldsInfo.Find(EPbkFieldIdNote);
-        if (iNote) item->AddFieldL(*iNote).TextStorage()->SetTextL(ToSymbianStr(fullNote));
-
-        // СОХРАНЯЕМ
-        if (isNew) db->AddNewContactL(*item);
-        else db->CommitContactL(*item);
-
-        CleanupStack::PopAndDestroy(item);
-    });
-
-    if (itemErr != KErrNone) {
-        qDebug() << "Ошибка сохранения контакта! Symbian Error:" << itemErr;
     }
-}
-CleanupStack::PopAndDestroy(db);
-});
 #endif
 }
 
