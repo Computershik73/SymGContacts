@@ -1029,30 +1029,26 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave)
                 item = db->ReadContactLC((TContactItemId)lc.symbianId);
             }
 
-            // Защита от записи в readonly контакты (0x00000002 это KContactFixed)
+            // --- ОБНОВЛЕНИЕ ОДИНОЧНЫХ ПОЛЕЙ ПО МЕСТУ ---
+            SmartSetSingleFieldL(item, EPbkFieldIdFirstName, lc.firstName, fieldsInfo);
+            SmartSetSingleFieldL(item, EPbkFieldIdLastName, lc.lastName, fieldsInfo);
+            SmartSetSingleFieldL(item, EPbkFieldIdCompanyName, lc.company, fieldsInfo);
+            SmartSetSingleFieldL(item, EPbkFieldIdJobTitle, lc.jobTitle, fieldsInfo);
 
-
-            // --- ИСПОЛЬЗУЕМ ХЕЛПЕРЫ ДЛЯ АБСОЛЮТНО ВСЕХ ПОЛЕЙ ---
-
-            // 1. Одиночные текстовые поля
-            SetSingleFieldL(item, EPbkFieldIdFirstName, ToSymbianStr(lc.firstName), fieldsInfo);
-            SetSingleFieldL(item, EPbkFieldIdLastName, ToSymbianStr(lc.lastName), fieldsInfo);
-            SetSingleFieldL(item, EPbkFieldIdCompanyName, ToSymbianStr(lc.company), fieldsInfo);
-            SetSingleFieldL(item, EPbkFieldIdJobTitle, ToSymbianStr(lc.jobTitle), fieldsInfo);
-
+            // Скрытый RemoteId и оригинальная заметка
             QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
-            SetSingleFieldL(item, EPbkFieldIdNote, ToSymbianStr(fullNote), fieldsInfo);
+            SmartSetSingleFieldL(item, EPbkFieldIdNote, fullNote, fieldsInfo);
 
-            // 2. Множественные поля (Списки)
-            SetMultiFieldL(item, EPbkFieldIdPhoneNumberGeneral, lc.phones, fieldsInfo);
-            SetMultiFieldL(item, EPbkFieldIdEmailAddress, lc.emails, fieldsInfo);
-            SetMultiFieldL(item, EPbkFieldIdPostalAddress, lc.addresses, fieldsInfo);
-            SetMultiFieldL(item, EPbkFieldIdURL, lc.urls, fieldsInfo);
+            // --- ОБНОВЛЕНИЕ МНОЖЕСТВЕННЫХ ПОЛЕЙ (Списки) ---
+            SmartSetMultiFieldL(item, EPbkFieldIdPhoneNumberGeneral, lc.phones, fieldsInfo);
+            SmartSetMultiFieldL(item, EPbkFieldIdEmailAddress, lc.emails, fieldsInfo);
+            SmartSetMultiFieldL(item, EPbkFieldIdPostalAddress, lc.addresses, fieldsInfo);
+            SmartSetMultiFieldL(item, EPbkFieldIdURL, lc.urls, fieldsInfo);
 
-            // 3. Поле с датой
-            SetDateFieldL(item, EPbkFieldIdDate, lc.birthday, fieldsInfo);
+            // --- ОБНОВЛЕНИЕ ДАТЫ ---
+            SmartSetDateFieldL(item, EPbkFieldIdDate, lc.birthday, fieldsInfo);
 
-            // --- ФИНАЛ ---
+            // --- СОХРАНЕНИЕ ---
             if (isNew) {
                 db->AddNewContactL(*item);
             } else {
@@ -1062,7 +1058,7 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave)
             CleanupStack::PopAndDestroy(item);
             CleanupStack::PopAndDestroy(db);
 
-            // ПАУЗА: Спасает от ошибки -21 (Access Denied) между контактами
+            // ПАУЗА: дает базе данных Symbian время закрыть дескрипторы файла
             User::After(50000);
         });
 
