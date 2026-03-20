@@ -147,8 +147,8 @@ void SyncThread::run()
             return;
         }
     }
-   // LocalSslProxy localProxy;
-   // localProxy.listen(QHostAddress::LocalHost, 8080);
+    // LocalSslProxy localProxy;
+    // localProxy.listen(QHostAddress::LocalHost, 8080);
     QString refreshToken = settings.value("refreshToken").toString();
     if (refreshToken.isEmpty()) {
         emit m_parent->syncFinished(false, "Нет токена. Требуется авторизация.");
@@ -164,17 +164,31 @@ void SyncThread::run()
 
     // Запускаем основную логику
     executeSync(accessToken);
-  //  localProxy.close();
+    //  localProxy.close();
 }
 
 QString SyncThread::calculateHashLocal(const LocalContact &lc)
 {
-    QString raw = QString("%1|%2|%3|%4|%5")
+    // Очищаем телефоны и email
+    QStringList phones = lc.phones;
+    for(int i=0; i < phones.size(); ++i) phones[i] = CleanPhone(phones[i]);
+    phones.sort();
+
+    QStringList emails = lc.emails;
+    for(int i=0; i < emails.size(); ++i) emails[i] = emails[i].trimmed().toLower();
+    emails.sort();
+
+    // Хэшируем только контент
+    QString raw = QString("%1|%2|%3|%4|%5|%6")
             .arg(lc.firstName.trimmed().toLower())
             .arg(lc.lastName.trimmed().toLower())
-            .arg(lc.phones.join(","))
-            .arg(lc.emails.join(","))
-            .arg(lc.remoteId); // Включаем remoteId в хэш, чтобы привязка была жесткой
+            .arg(phones.join(","))
+            .arg(emails.join(","))
+            .arg(lc.company.trimmed().toLower())
+            .arg(lc.jobTitle.trimmed().toLower());
+
+    // ВАЖНЫЙ ДЕБАГ: выведите это в консоль
+    qDebug() << "[HASH-LOCAL] raw:" << raw;
 
     QByteArray hash = QCryptographicHash::hash(raw.toUtf8(), QCryptographicHash::Sha1);
     return QString::fromLatin1(hash.toHex());
@@ -182,15 +196,31 @@ QString SyncThread::calculateHashLocal(const LocalContact &lc)
 
 QString SyncThread::calculateHash(const GoogleContact &gc)
 {
-    QString raw = QString("%1|%2|%3|%4|%5")
+    QStringList phones = gc.phones;
+    for(int i=0; i < phones.size(); ++i) phones[i] = CleanPhone(phones[i]);
+    phones.sort();
+
+    QStringList emails = gc.emails;
+    emails.sort();
+
+    QString raw = QString("%1|%2|%3|%4|%5|%6")
             .arg(gc.firstName.trimmed().toLower())
             .arg(gc.lastName.trimmed().toLower())
-            .arg(gc.phones.join(","))
-            .arg(gc.emails.join(","))
-            .arg(gc.id);
+            .arg(phones.join(","))
+            .arg(emails.join(","))
+            .arg(gc.company.trimmed().toLower())
+            .arg(gc.jobTitle.trimmed().toLower());
 
     QByteArray hash = QCryptographicHash::hash(raw.toUtf8(), QCryptographicHash::Sha1);
     return QString::fromLatin1(hash.toHex());
+}
+
+QString SyncThread::CleanPhone(const QString& phone)
+{
+    QString cleaned = phone;
+    // Удаляем всё, кроме цифр и плюса
+    cleaned.replace(" ", "").replace("-", "").replace("-", "").replace("-", "").replace("-", "").replace("-", "").replace("(", "").replace(")", "").replace("+", "").replace(" ", "").replace(" ", "");
+    return cleaned;
 }
 
 void SyncThread::applyGoogleDataToLocal(const GoogleContact &gc, LocalContact &lc)
@@ -199,10 +229,29 @@ void SyncThread::applyGoogleDataToLocal(const GoogleContact &gc, LocalContact &l
     lc.lastName = gc.lastName;
 
     lc.phones.clear();
-    lc.phones = gc.phones; // Теперь телефоны хранятся списком
+    lc.phones = gc.phones;
 
     lc.emails.clear();
     lc.emails = gc.emails;
+
+    lc.addresses.clear();
+    lc.addresses = gc.addresses;
+
+    lc.urls.clear();
+    lc.urls = gc.urls;
+
+    lc.company = gc.company;
+    lc.jobTitle = gc.jobTitle;
+    lc.notes = gc.notes;
+
+    if (gc.birthday.year != 0 || gc.birthday.month != 0 || gc.birthday.day != 0) {
+        lc.birthday = QString("%1-%2-%3")
+                .arg(gc.birthday.year)
+                .arg(gc.birthday.month, 2, 10, QChar('0'))
+                .arg(gc.birthday.day, 2, 10, QChar('0'));
+    } else {
+        lc.birthday = "";
+    }
 
     // RemoteId должен быть уже задан в lc перед вызовом
 }
@@ -488,63 +537,56 @@ void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleCon
 
 bool SyncThread::updateGoogleContact(const QString &accessToken, const LocalContact &localContact, const QString &etag)
 {
-    // 1. Формируем JSON (аналогично BuildGoogleContactJson)
-    // Используем упрощенный подход (строки), т.к. Qt 4 не имеет удобного QJsonObject
     QString json = "{\"etag\": \"" + etag + "\",";
 
-    // 1. Создаем копию строки
+    // Экранируем кавычки и УДАЛЯЕМ ПЕРЕНОСЫ СТРОК (чтобы не было ошибки 400)
     QString safeFirstName = localContact.firstName;
-    safeFirstName.replace("\"", "\\\"");
+    safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
 
     QString safeLastName = localContact.lastName;
-    safeLastName.replace("\"", "\\\"");
+    safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
 
-    // 2. Используем копии
-    json += "\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}],";
+    json += "\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}],";
 
     if (!localContact.phones.isEmpty()) {
-        json += "\"phoneNumbers\": [";
+        json += "\"phoneNumbers\":[";
         for (int i = 0; i < localContact.phones.size(); ++i) {
-            QString p = localContact.phones[i]; // Создаем временную копию
-            p.replace("\"", "\\\"");            // Меняем её
-            json += "{\"value\": \"" + p + "\"}"; // Используем
+            QString p = localContact.phones[i];
+            p.replace("\"", "\\\"").replace("\n", "").replace("\r", ""); // Удаляем переносы в номере
+            json += "{\"value\": \"" + p + "\"}";
             if (i < localContact.phones.size() - 1) json += ",";
         }
         json += "],";
     }
 
-    // Закрываем JSON
     if (json.endsWith(",")) json.chop(1);
     json += "}";
 
-    // 2. Отправляем PATCH
     QNetworkAccessManager net;
     QString resourceId = localContact.remoteId;
     if (!resourceId.startsWith("people/")) resourceId = "people/" + resourceId;
 
-    // ВАЖНО: маска полей для Google
-    QString url = "https://people.googleapis.com/v1/" + resourceId + ":updateContact?updatePersonFields=names,phoneNumbers";
+    QString url = "https://people.googleapis.com/v1/" + resourceId + ":updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,addresses,urls,organizations,biographies,birthdays";
     QUrl qurll(url);
     QNetworkRequest req(qurll);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("Authorization", QString("Bearer " + accessToken).toUtf8());
-    // Если нужно строгое соответствие версии:
     req.setRawHeader("If-Match", QString("\"" + etag + "\"").toUtf8());
+
     QByteArray data = json.toUtf8();
     QBuffer *buffer = new QBuffer();
     buffer->setData(data);
     buffer->open(QIODevice::ReadOnly);
+
     QNetworkReply *reply = net.sendCustomRequest(req, "PATCH", buffer);
     QString response = syncWait(reply);
 
-    if (reply->error() == QNetworkReply::NoError) {
-        qDebug() << "[OK] Обновлено в Google:" << localContact.firstName;
-        return true;
-    } else {
-        qDebug() << "[ERROR] Google PATCH:" << response;
-        return false;
-    }
+    bool success = (reply->error() == QNetworkReply::NoError);
+    if (!success) qDebug() << "[ERROR] Google PATCH:" << response;
+
+    return success;
 }
+
 
 bool SyncThread::deleteGoogleContact(const QString &accessToken, const QString &resourceName)
 {
@@ -653,10 +695,11 @@ void SyncThread::executeSync(const QString &accessToken)
     }
     if (!toDeleteLocally.isEmpty()) deleteSymbianContacts(toDeleteLocally, db);
 
+    QList<LocalContact> contactsToSaveToPhone;
+
     // === ФАЗА 3: СИНХРОНИЗАЦИЯ И РАЗРЕШЕНИЕ КОНФЛИКТОВ ===
     for (int i = 0; i < googleContacts.size(); ++i) {
         GoogleContact &gc = googleContacts[i];
-        emit m_parent->progressUpdated(QString("Синхронизация... %1/%2").arg(i+1).arg(googleContacts.size()));
 
         LocalContact* lc = NULL;
         for (int j = 0; j < existingContacts.size(); ++j) {
@@ -674,42 +717,70 @@ void SyncThread::executeSync(const QString &accessToken)
             QString lastHash = state.hashes.value(gc.id, "");
             QString lastEtag = state.etags.value(gc.id, "");
 
-            bool isFirstSync = lastHash.isEmpty();
-            bool cloudChanged = !isFirstSync && gc.etag != lastEtag;
-            bool localChanged = !isFirstSync && localHash != lastHash;
+            // 1. Проверяем изменения
+            bool cloudChanged = false;
+            if (!lastEtag.isEmpty() && gc.etag != lastEtag) cloudChanged = true;
 
-            if (isFirstSync || cloudChanged) {
-                // Приоритет у Google (или первая синхронизация)
-                qDebug() << "[!] Download: Обновление из Google для" << gc.firstName;
+            bool localChanged = false;
+            if (!lastHash.isEmpty() && localHash != lastHash) localChanged = true;
+
+            // Если хэши идентичны — никто не менялся
+            if (googleHash == localHash) {
+                cloudChanged = false;
+                localChanged = false;
+            }
+
+            // РАЗРЕШЕНИЕ КОНФЛИКТОВ
+            if (lastHash.isEmpty()) {
+                // Первая синхронизация этого контакта (связывание).
                 applyGoogleDataToLocal(gc, *lc);
-                newHashes[gc.id] = googleHash;
-            } else if (localChanged) {
-                // Изменился только телефон
-                qDebug() << "[^] Upload: Отправка изменений в Google для" << lc->firstName;
+                newHashes[gc.id] = calculateHashLocal(*lc);
+
+                // ВАЖНО: Добавляем в список на сохранение в телефон
+                contactsToSaveToPhone.append(*lc);
+            }
+            else if (localChanged && !cloudChanged) {
+                // Изменился ТОЛЬКО телефон -> UPLOAD (Отправляем в Google)
+                qDebug() << "[^] Upload: Отправка локальных изменений в Google для" << lc->firstName;
                 if (updateGoogleContact(accessToken, *lc, gc.etag)) {
                     newHashes[gc.id] = localHash;
                     uploadedCount++;
                 } else {
-                    newHashes[gc.id] = lastHash; // Оставляем старый, если ошибка
+                    newHashes[gc.id] = lastHash;
                 }
-            } else {
-                // Ничего не изменилось
+            }
+            else if (cloudChanged) {
+                // Изменился Google -> DOWNLOAD (Сохраняем в телефон)
+                qDebug() << "[!] Download: Обновление из Google для" << gc.firstName;
+                applyGoogleDataToLocal(gc, *lc);
+                newHashes[gc.id] = calculateHashLocal(*lc);
+                downloadedCount++;
+
+                // ВАЖНО: Добавляем в список на сохранение в телефон
+                contactsToSaveToPhone.append(*lc);
+            }
+            else {
+                // НИКТО НЕ МЕНЯЛСЯ. Мы ничего не отправляем в Google и НЕ сохраняем в телефон!
                 newHashes[gc.id] = localHash;
             }
+
             newEtags[gc.id] = gc.etag;
         }
-        else // Новый контакт из Google, которого нет на телефоне
+        else
         {
+            // НОВЫЙ КОНТАКТ ИЗ GOOGLE -> DOWNLOAD (Сохраняем в телефон)
             qDebug() << "[+] Download: Создание нового контакта" << gc.firstName;
             LocalContact newLc;
             newLc.symbianId = 0;
             newLc.remoteId = gc.id;
             applyGoogleDataToLocal(gc, newLc);
 
-            // Вносим в список для однократной записи в базу
             existingContacts.append(newLc);
 
-            newHashes[gc.id] = googleHash;
+            // ВАЖНО: Добавляем в список на сохранение в телефон
+            contactsToSaveToPhone.append(newLc);
+
+            newHashes[gc.id] = calculateHashLocal(newLc);
             newEtags[gc.id] = gc.etag;
             downloadedCount++;
         }
@@ -725,23 +796,31 @@ void SyncThread::executeSync(const QString &accessToken)
             if (!newId.isEmpty()) {
                 existingContacts[i].remoteId = newId;
                 newHashes[newId] = calculateHashLocal(existingContacts[i]);
+                contactsToSaveToPhone.append(existingContacts[i]);
                 uploadedCount++;
             }
         }
     }
 
+    if (!contactsToSaveToPhone.isEmpty()) {
+        emit m_parent->progressUpdated("Сохранение изменений в телефон...");
+        saveSymbianContacts(contactsToSaveToPhone, db);
+    } else {
+        qDebug() << "[SAVE] Нет изменений для сохранения в телефон.";
+    }
+
     // Финальная запись ВСЕХ изменений в телефонную книгу
     emit m_parent->progressUpdated("Сохранение в телефон...");
-    saveSymbianContacts(existingContacts, db);
+
     CleanupStack::PopAndDestroy(db);
     emit m_parent->progressUpdated("Сохранение состояния...");
     saveSyncState(newEtags, newHashes);
     
     emit m_parent->syncFinished(true, QString("Готово! Обновлено: %1, Выгружено: %2").arg(downloadedCount).arg(uploadedCount));
     
-//});
+    //});
 
-  /*  if (dbErr != KErrNone) {
+    /*  if (dbErr != KErrNone) {
         qDebug() << "КРИТИЧЕСКАЯ ОШИБКА CContactDatabase:" << dbErr;
     }*/
     // СОХРАНЯЕМ НОВОЕ СОСТОЯНИЕ ДЛЯ СЛЕДУЮЩЕГО РАЗА
@@ -865,13 +944,13 @@ void SyncThread::readSymbianContacts(QList<LocalContact> &list, CContactDatabase
           qDebug() << "[READ] Открытие CContactDatabase...";
             //  CContactDatabase* db = NULL;
             /* TRAPD(openErr, db = CContactDatabase::OpenL());
-            if (openErr == KErrNotFound) {
-                qDebug() << "[READ] База не найдена, создаем новую...";
-                db = CContactDatabase::CreateL();
-            } else {
-                User::LeaveIfError(openErr);
-            }
-            CleanupStack::PushL(db);*/
+                            if (openErr == KErrNotFound) {
+                                qDebug() << "[READ] База не найдена, создаем новую...";
+                                db = CContactDatabase::CreateL();
+                            } else {
+                                User::LeaveIfError(openErr);
+                            }
+                            CleanupStack::PushL(db);*/
 
             qDebug() << "[READ] Создание итератора...";
     TContactIter iter(*aDb);
@@ -890,80 +969,84 @@ void SyncThread::readSymbianContacts(QList<LocalContact> &list, CContactDatabase
             //continue;
         } else {
 
-        LocalContact lc;
-        lc.symbianId = (long)id;
+            LocalContact lc;
+            lc.symbianId = (long)id;
 
-        CContactItemFieldSet& fieldSet = item->CardFields();
-        qDebug() << "[READ] Найдено полей:" << fieldSet.Count();
+            CContactItemFieldSet& fieldSet = item->CardFields();
+            qDebug() << "[READ] Найдено полей:" << fieldSet.Count();
 
-        for (int k = 0; k < fieldSet.Count(); ++k) {
-            CContactItemField& field = fieldSet[k];
+            for (int k = 0; k < fieldSet.Count(); ++k) {
+                CContactItemField& field = fieldSet[k];
 
-            // ГЕНИАЛЬНЫЙ ХАК GAMMU: Вызываем методы цепочкой, избегая CContentType&
-            if (field.ContentType().ContainsFieldType(KUidContactFieldGivenName)) {
-                lc.firstName = ToQString(field.TextStorage()->Text());
-                qDebug() << "[READ] Имя:" << lc.firstName;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldFamilyName)) {
-                lc.lastName = ToQString(field.TextStorage()->Text());
-                qDebug() << "[READ] Фамилия:" << lc.lastName;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldPhoneNumber)) {
-                QString phone = ToQString(field.TextStorage()->Text());
-                lc.phones.append(phone);
-                qDebug() << "[READ] Телефон:" << phone;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldEMail)) {
-                QString email = ToQString(field.TextStorage()->Text());
-                lc.emails.append(email);
-                qDebug() << "[READ] Email:" << email;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldPostOffice)) {
-                QString addr = ToQString(field.TextStorage()->Text());
-                lc.addresses.append(addr);
-                qDebug() << "[READ] Адрес:" << addr;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldUrl)) {
-                QString url = ToQString(field.TextStorage()->Text());
-                lc.urls.append(url);
-                qDebug() << "[READ] URL:" << url;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldCompanyName)) {
-                lc.company = ToQString(field.TextStorage()->Text());
-                qDebug() << "[READ] Компания:" << lc.company;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldJobTitle)) {
-                lc.jobTitle = ToQString(field.TextStorage()->Text());
-                qDebug() << "[READ] Должность:" << lc.jobTitle;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldBirthday)) {
-                TTime time = field.DateTimeStorage()->Time();
-                TDateTime dt = time.DateTime();
-                lc.birthday = QString("%1-%2-%3")
-                        .arg(dt.Year())
-                        .arg(dt.Month() + 1, 2, 10, QChar('0'))
-                        .arg(dt.Day() + 1, 2, 10, QChar('0'));
-                qDebug() << "[READ] День рождения:" << lc.birthday;
-            }
-            else if (field.ContentType().ContainsFieldType(KUidContactFieldNote)) {
-                QString noteText = ToQString(field.TextStorage()->Text());
-                int start = noteText.indexOf("[GID:");
-                if (start != -1) {
-                    int end = noteText.indexOf("]", start);
-                    if (end != -1) {
-                        lc.remoteId = noteText.mid(start + 5, end - start - 5);
-                        qDebug() << "[READ] Скрытый Google ID:" << lc.remoteId;
+                // ГЕНИАЛЬНЫЙ ХАК GAMMU: Вызываем методы цепочкой, избегая CContentType&
+                if (field.ContentType().ContainsFieldType(KUidContactFieldGivenName)) {
+                    lc.firstName = ToQString(field.TextStorage()->Text());
+                    qDebug() << "[READ] Имя:" << lc.firstName;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldFamilyName)) {
+                    lc.lastName = ToQString(field.TextStorage()->Text());
+                    qDebug() << "[READ] Фамилия:" << lc.lastName;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldPhoneNumber)) {
+                    QString phone = ToQString(field.TextStorage()->Text());
+                    lc.phones.append(phone);
+                    qDebug() << "[READ] Телефон:" << phone;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldEMail)) {
+                    QString email = ToQString(field.TextStorage()->Text());
+                    lc.emails.append(email);
+                    qDebug() << "[READ] Email:" << email;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldPostOffice)) {
+                    QString addr = ToQString(field.TextStorage()->Text());
+                    lc.addresses.append(addr);
+                    qDebug() << "[READ] Адрес:" << addr;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldUrl)) {
+                    QString url = ToQString(field.TextStorage()->Text());
+                    lc.urls.append(url);
+                    qDebug() << "[READ] URL:" << url;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldCompanyName)) {
+                    lc.company = ToQString(field.TextStorage()->Text());
+                    qDebug() << "[READ] Компания:" << lc.company;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldJobTitle)) {
+                    lc.jobTitle = ToQString(field.TextStorage()->Text());
+                    qDebug() << "[READ] Должность:" << lc.jobTitle;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldBirthday)) {
+                    TTime time = field.DateTimeStorage()->Time();
+                    TDateTime dt = time.DateTime();
+                    lc.birthday = QString("%1-%2-%3")
+                            .arg(dt.Year())
+                            .arg(dt.Month() + 1, 2, 10, QChar('0'))
+                            .arg(dt.Day() + 1, 2, 10, QChar('0'));
+                    qDebug() << "[READ] День рождения:" << lc.birthday;
+                }
+                else if (field.ContentType().ContainsFieldType(KUidContactFieldNote)) {
+                    QString noteText = ToQString(field.TextStorage()->Text());
+                    int start = noteText.indexOf("[GID:");
+                    if (start != -1) {
+                        int end = noteText.indexOf("]", start);
+                        if (end != -1) {
+                            lc.remoteId = noteText.mid(start + 5, end - start - 5);
+                            qDebug() << "[READ] Скрытый Google ID:" << lc.remoteId;
+                        }
+                    } else {
+                        lc.notes = noteText;
+                        qDebug() << "[READ] Заметка:" << lc.notes;
                     }
-                } else {
-                    lc.notes = noteText;
-                    qDebug() << "[READ] Заметка:" << lc.notes;
                 }
             }
-        }
+            lc.phones.sort();
+            lc.emails.sort();
+            lc.addresses.sort();
+            lc.urls.sort();
 
-        list.append(lc);
-        CleanupStack::PopAndDestroy(item);
-        qDebug() << "[READ] Контакт успешно прочитан.";
+            list.append(lc);
+            CleanupStack::PopAndDestroy(item);
+            qDebug() << "[READ] Контакт успешно прочитан.";
         }
     });
 
@@ -985,13 +1068,11 @@ if (dbErr != KErrNone) {
 
 QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &accessToken)
 {
-    // Простая сборка JSON для Qt 4
     QString safeFirstName = lc.firstName;
     QString safeLastName = lc.lastName;
 
-    // Теперь .replace() не вызовет ошибку, так как мы меняем временную переменную, а не константный объект
-    safeFirstName.replace("\"", "\\\"");
-    safeLastName.replace("\"", "\\\"");
+    safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
 
     QString json = "{";
     json += "\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}],";
@@ -999,15 +1080,14 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
     if (!lc.phones.isEmpty()) {
         json += "\"phoneNumbers\":[";
         for (int i=0; i<lc.phones.size(); ++i) {
-            QString p = lc.phones[i]; // Временная копия
-            p.replace("\"", "\\\"");  // Безопасно меняем копию
+            QString p = lc.phones[i];
+            p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
             json += "{\"value\": \"" + p + "\"}";
             if (i < lc.phones.size()-1) json += ",";
         }
         json += "],";
     }
 
-    // Убираем последнюю запятую
     if (json.endsWith(",")) json.chop(1);
     json += "}";
 
@@ -1017,7 +1097,12 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
     req.setRawHeader("Authorization", QString("Bearer " + accessToken).toUtf8());
     req.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, false);
 
-    QNetworkReply *reply = net.post(req, json.toUtf8());
+    QByteArray data = json.toUtf8();
+    QBuffer *buffer = new QBuffer();
+    buffer->setData(data);
+    buffer->open(QIODevice::ReadOnly);
+
+    QNetworkReply *reply = net.post(req, buffer);
     QString response = syncWait(reply);
 
     QScriptEngine engine;
@@ -1092,48 +1177,48 @@ void SyncThread::SetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStr
 { \
     int fIdx = -1; \
     for (int k = 0; k < fieldSet.Count(); ++k) { \
-        const CContentType* cType = &fieldSet[k].ContentType(); \
-        if (cType->ContainsFieldType(FieldUid)) { fIdx = k; break; } \
+    const CContentType* cType = &fieldSet[k].ContentType(); \
+    if (cType->ContainsFieldType(FieldUid)) { fIdx = k; break; } \
     } \
     if (Value.isEmpty()) { \
-        if (fIdx != -1) fieldSet[fIdx].TextStorage()->SetTextL(KNullDesC); \
+    if (fIdx != -1) fieldSet[fIdx].TextStorage()->SetTextL(KNullDesC); \
     } else { \
-        if (fIdx != -1) { \
-            fieldSet[fIdx].TextStorage()->SetTextL(ToSymbianStr(Value)); \
-        } else { \
-            CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
-            f->AddFieldTypeL(FieldUid); \
-            f->SetMapping(VcardMap); \
-            f->TextStorage()->SetTextL(ToSymbianStr(Value)); \
-            item->AddFieldL(*f); \
-            CleanupStack::Pop(f); \
-        } \
+    if (fIdx != -1) { \
+    fieldSet[fIdx].TextStorage()->SetTextL(ToSymbianStr(Value)); \
+    } else { \
+    CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
+    f->AddFieldTypeL(FieldUid); \
+    f->SetMapping(VcardMap); \
+    f->TextStorage()->SetTextL(ToSymbianStr(Value)); \
+    item->AddFieldL(*f); \
+    CleanupStack::Pop(f); \
     } \
-}
+    } \
+    }
 
 #define SET_MULTI_FIELD(FieldUid, VcardMap, ValuesList) \
 { \
     QList<int> existIdx; \
     for (int k = 0; k < fieldSet.Count(); ++k) { \
-        const CContentType* cType = &fieldSet[k].ContentType(); \
-        if (cType->ContainsFieldType(FieldUid)) { existIdx.append(k); } \
+    const CContentType* cType = &fieldSet[k].ContentType(); \
+    if (cType->ContainsFieldType(FieldUid)) { existIdx.append(k); } \
     } \
     int minC = qMin(existIdx.size(), ValuesList.size()); \
     for (int i = 0; i < minC; ++i) { \
-        fieldSet[existIdx[i]].TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
+    fieldSet[existIdx[i]].TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
     } \
     for (int i = minC; i < ValuesList.size(); ++i) { \
-        CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
-        f->AddFieldTypeL(FieldUid); \
-        f->SetMapping(VcardMap); \
-        f->TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
-        item->AddFieldL(*f); \
-        CleanupStack::Pop(f); \
+    CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
+    f->AddFieldTypeL(FieldUid); \
+    f->SetMapping(VcardMap); \
+    f->TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
+    item->AddFieldL(*f); \
+    CleanupStack::Pop(f); \
     } \
     for (int i = minC; i < existIdx.size(); ++i) { \
-        fieldSet[existIdx[i]].TextStorage()->SetTextL(KNullDesC); \
+    fieldSet[existIdx[i]].TextStorage()->SetTextL(KNullDesC); \
     } \
-}
+    }
 
 
 // =======================================================================
@@ -1167,7 +1252,7 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
         }*/
         TInt itemErr = KErrNone;
         TRAP(itemErr, {
-              CContactItem* item = NULL;
+             CContactItem* item = NULL;
                 bool isNew = (lc.symbianId == 0);
 
         if (isNew) {
@@ -1183,21 +1268,21 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
         CContactItemFieldSet& fieldSet = item->CardFields();
 
         SET_SINGLE_FIELD(KUidContactFieldGivenName, KUidContactFieldVCardMapUnusedN, lc.firstName);
-                        SET_SINGLE_FIELD(KUidContactFieldFamilyName, KUidContactFieldVCardMapUnusedN, lc.lastName);
-                        SET_SINGLE_FIELD(KUidContactFieldCompanyName, KUidContactFieldVCardMapORG, lc.company);
-                        SET_SINGLE_FIELD(KUidContactFieldJobTitle, KUidContactFieldVCardMapTITLE, lc.jobTitle);
+        SET_SINGLE_FIELD(KUidContactFieldFamilyName, KUidContactFieldVCardMapUnusedN, lc.lastName);
+        SET_SINGLE_FIELD(KUidContactFieldCompanyName, KUidContactFieldVCardMapORG, lc.company);
+        SET_SINGLE_FIELD(KUidContactFieldJobTitle, KUidContactFieldVCardMapTITLE, lc.jobTitle);
 
-                        QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
-                        SET_SINGLE_FIELD(KUidContactFieldNote, KUidContactFieldVCardMapNOTE, fullNote);
+        QString fullNote = QString("[GID:%1]\n%2").arg(lc.remoteId).arg(lc.notes).trimmed();
+        SET_SINGLE_FIELD(KUidContactFieldNote, KUidContactFieldVCardMapNOTE, fullNote);
 
-                        // 2. ОБНОВЛЕНИЕ СПИСКОВЫХ ПОЛЕЙ (Телефоны, Email, Адреса, URL)
-                        SET_MULTI_FIELD(KUidContactFieldPhoneNumber, KUidContactFieldVCardMapTEL, lc.phones);
-                        SET_MULTI_FIELD(KUidContactFieldEMail, KUidContactFieldVCardMapEMAILINTERNET, lc.emails);
-                        SET_MULTI_FIELD(KUidContactFieldPostOffice, KUidContactFieldVCardMapADR, lc.addresses);
-                        SET_MULTI_FIELD(KUidContactFieldUrl, KUidContactFieldVCardMapURL, lc.urls);
+        // 2. ОБНОВЛЕНИЕ СПИСКОВЫХ ПОЛЕЙ (Телефоны, Email, Адреса, URL)
+        SET_MULTI_FIELD(KUidContactFieldPhoneNumber, KUidContactFieldVCardMapTEL, lc.phones);
+        SET_MULTI_FIELD(KUidContactFieldEMail, KUidContactFieldVCardMapEMAILINTERNET, lc.emails);
+        SET_MULTI_FIELD(KUidContactFieldPostOffice, KUidContactFieldVCardMapADR, lc.addresses);
+        SET_MULTI_FIELD(KUidContactFieldUrl, KUidContactFieldVCardMapURL, lc.urls);
 
         // 10. ДЕНЬ РОЖДЕНИЯ
-       /* qDebug() << "[SAVE] Добавление Дня рождения...";
+        /* qDebug() << "[SAVE] Добавление Дня рождения...";
         if (!lc.birthday.isEmpty()) {
             QStringList parts = lc.birthday.split("-");
             if (parts.size() == 3) {
@@ -1217,18 +1302,18 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
             qDebug() << "[SAVE] Запись нового контакта в базу (AddNewContactL)...";
             aDb->AddNewContactL(*item);
             CleanupStack::PopAndDestroy(item);
-                    qDebug() << "[SAVE] Контакт успешно сохранен!";
+            qDebug() << "[SAVE] Контакт успешно сохранен!";
         } else {
             qDebug() << "[SAVE] Запись изменений в базу (CommitContactL)...";
             if (item == NULL) {
                 qDebug() << "[SAVE] ОШИБКА: item == NULL перед Commit!";
-               
+
                 
             } else {
-            qDebug() << "[SAVE] Попытка Commit для контакта с ID:" << lc.symbianId;
-            aDb->CommitContactL(*item);
-            CleanupStack::PopAndDestroy(item);
-                    qDebug() << "[SAVE] Контакт успешно сохранен!";
+                qDebug() << "[SAVE] Попытка Commit для контакта с ID:" << lc.symbianId;
+                aDb->CommitContactL(*item);
+                CleanupStack::PopAndDestroy(item);
+                qDebug() << "[SAVE] Контакт успешно сохранен!";
             }
         }
 
@@ -1238,12 +1323,12 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
 
 
     if (itemErr != KErrNone) {
-                    qDebug() << "[SAVE][ОШИБКА] Сбой при сохранении контакта" << lc.firstName << "Код:" << itemErr;
-                    // Снимаем блокировку с базы данных, если сохранение прервалось!
-                    if (lc.symbianId != 0) {
-                        TRAP_IGNORE(aDb->CloseContactL((TContactItemId)lc.symbianId));
-                    }
-                }
+        qDebug() << "[SAVE][ОШИБКА] Сбой при сохранении контакта" << lc.firstName << "Код:" << itemErr;
+        // Снимаем блокировку с базы данных, если сохранение прервалось!
+        if (lc.symbianId != 0) {
+            TRAP_IGNORE(aDb->CloseContactL((TContactItemId)lc.symbianId));
+        }
+    }
 
     // Даем базе Symbian 20мс на сброс файловых буферов
     User::After(20000);
@@ -1274,8 +1359,8 @@ void SyncThread::deleteSymbianContacts(const QList<long> &toDelete, CContactData
         }
     }
 
-  //  CleanupStack::PopAndDestroy(db);
-//});
+    //  CleanupStack::PopAndDestroy(db);
+    //});
 #endif
 }
 

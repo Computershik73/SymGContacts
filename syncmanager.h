@@ -78,6 +78,7 @@ private:
     QString getAccessToken(const QString &refreshToken);
     bool doDeviceAuthFlow();
     void executeSync(const QString &accessToken);
+    QString CleanPhone(const QString& phone);
 #ifdef Q_OS_SYMBIAN
     // Хелперы для работы с контактами Symbian
     void SetSingleFieldL(class CPbkContactItem* aItem, int aFieldId, const TDesC& aValue, const class CPbkFieldsInfo& aFieldsInfo);
