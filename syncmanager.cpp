@@ -537,36 +537,77 @@ void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleCon
 
 bool SyncThread::updateGoogleContact(const QString &accessToken, const LocalContact &localContact, const QString &etag)
 {
-    QString json = "{\"etag\": \"" + etag + "\",";
+    QStringList jsonParts;
+    jsonParts.append("\"etag\": \"" + etag + "\"");
 
-    // Экранируем кавычки и УДАЛЯЕМ ПЕРЕНОСЫ СТРОК (чтобы не было ошибки 400)
-    QString safeFirstName = localContact.firstName;
-    safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    // ИМЕНА
+    QString safeFirstName = localContact.firstName; safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    QString safeLastName = localContact.lastName; safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    jsonParts.append("\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}]");
 
-    QString safeLastName = localContact.lastName;
-    safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-
-    json += "\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}],";
-
+    // ТЕЛЕФОНЫ
     if (!localContact.phones.isEmpty()) {
-        json += "\"phoneNumbers\":[";
+        QStringList phones;
         for (int i = 0; i < localContact.phones.size(); ++i) {
-            QString p = localContact.phones[i];
-            p.replace("\"", "\\\"").replace("\n", "").replace("\r", ""); // Удаляем переносы в номере
-            json += "{\"value\": \"" + p + "\"}";
-            if (i < localContact.phones.size() - 1) json += ",";
+            QString p = localContact.phones[i]; p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            phones.append("{\"value\": \"" + p + "\"}");
         }
-        json += "],";
+        jsonParts.append("\"phoneNumbers\":[" + phones.join(",") + "]");
     }
 
-    if (json.endsWith(",")) json.chop(1);
-    json += "}";
+    // EMAIL (ДОБАВЛЕНО!)
+    if (!localContact.emails.isEmpty()) {
+        QStringList emails;
+        for (int i = 0; i < localContact.emails.size(); ++i) {
+            QString e = localContact.emails[i]; e.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            emails.append("{\"value\": \"" + e + "\"}");
+        }
+        jsonParts.append("\"emailAddresses\":[" + emails.join(",") + "]");
+    }
+
+    // КОМПАНИЯ И ДОЛЖНОСТЬ (ДОБАВЛЕНО!)
+    if (!localContact.company.isEmpty() || !localContact.jobTitle.isEmpty()) {
+        QString safeCompany = localContact.company; safeCompany.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        QString safeTitle = localContact.jobTitle; safeTitle.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        jsonParts.append("\"organizations\":[{\"name\": \"" + safeCompany + "\", \"title\": \"" + safeTitle + "\"}]");
+    }
+
+    // АДРЕСА (ДОБАВЛЕНО!)
+    if (!localContact.addresses.isEmpty()) {
+        QStringList addresses;
+        for (int i = 0; i < localContact.addresses.size(); ++i) {
+            QString a = localContact.addresses[i]; a.replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
+            addresses.append("{\"streetAddress\": \"" + a + "\"}");
+        }
+        jsonParts.append("\"addresses\":[" + addresses.join(",") + "]");
+    }
+
+    // ДЕНЬ РОЖДЕНИЯ (ДОБАВЛЕНО!)
+    if (!localContact.birthday.isEmpty()) {
+        QStringList parts = localContact.birthday.split("-");
+        if (parts.size() == 3) {
+            QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
+                               .arg(parts[0]).arg(parts[1]).arg(parts[2]);
+            jsonParts.append(bdayJson);
+        }
+    }
+
+    // ЗАМЕТКИ (ДОБАВЛЕНО!)
+    if (!localContact.notes.isEmpty()) {
+        QString safeNotes = localContact.notes; safeNotes.replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
+        jsonParts.append("\"biographies\":[{\"value\": \"" + safeNotes + "\"}]");
+    }
+
+    // Собираем всё в одну строку
+    QString json = "{" + jsonParts.join(",") + "}";
 
     QNetworkAccessManager net;
     QString resourceId = localContact.remoteId;
     if (!resourceId.startsWith("people/")) resourceId = "people/" + resourceId;
 
-    QString url = "https://people.googleapis.com/v1/" + resourceId + ":updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,addresses,urls,organizations,biographies,birthdays";
+    // ВАЖНО: Разрешаем Google обновлять ВСЕ эти поля!
+    QString url = "https://people.googleapis.com/v1/" + resourceId +
+                  ":updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,addresses,organizations,birthdays,biographies";
     QUrl qurll(url);
     QNetworkRequest req(qurll);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -581,10 +622,10 @@ bool SyncThread::updateGoogleContact(const QString &accessToken, const LocalCont
     QNetworkReply *reply = net.sendCustomRequest(req, "PATCH", buffer);
     QString response = syncWait(reply);
 
-    bool success = (reply->error() == QNetworkReply::NoError);
-    if (!success) qDebug() << "[ERROR] Google PATCH:" << response;
-
-    return success;
+    bool ok = (reply->error() == QNetworkReply::NoError);
+    reply->deleteLater();
+    buffer->deleteLater();
+    return ok;
 }
 
 
@@ -1068,28 +1109,69 @@ if (dbErr != KErrNone) {
 
 QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &accessToken)
 {
-    QString safeFirstName = lc.firstName;
-    QString safeLastName = lc.lastName;
+    QStringList jsonParts;
 
-    safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-    safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
 
-    QString json = "{";
-    json += "\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}],";
+        // ИМЕНА
+        QString safeFirstName = lc.firstName; safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        QString safeLastName = lc.lastName; safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        jsonParts.append("\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}]");
 
-    if (!lc.phones.isEmpty()) {
-        json += "\"phoneNumbers\":[";
-        for (int i=0; i<lc.phones.size(); ++i) {
-            QString p = lc.phones[i];
-            p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
-            json += "{\"value\": \"" + p + "\"}";
-            if (i < lc.phones.size()-1) json += ",";
+        // ТЕЛЕФОНЫ
+        if (!lc.phones.isEmpty()) {
+            QStringList phones;
+            for (int i = 0; i < lc.phones.size(); ++i) {
+                QString p = lc.phones[i]; p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+                phones.append("{\"value\": \"" + p + "\"}");
+            }
+            jsonParts.append("\"phoneNumbers\":[" + phones.join(",") + "]");
         }
-        json += "],";
-    }
 
-    if (json.endsWith(",")) json.chop(1);
-    json += "}";
+        // EMAIL (ДОБАВЛЕНО!)
+        if (!lc.emails.isEmpty()) {
+            QStringList emails;
+            for (int i = 0; i < lc.emails.size(); ++i) {
+                QString e = lc.emails[i]; e.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+                emails.append("{\"value\": \"" + e + "\"}");
+            }
+            jsonParts.append("\"emailAddresses\":[" + emails.join(",") + "]");
+        }
+
+        // КОМПАНИЯ И ДОЛЖНОСТЬ (ДОБАВЛЕНО!)
+        if (!lc.company.isEmpty() || !lc.jobTitle.isEmpty()) {
+            QString safeCompany = lc.company; safeCompany.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+            QString safeTitle = lc.jobTitle; safeTitle.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+            jsonParts.append("\"organizations\":[{\"name\": \"" + safeCompany + "\", \"title\": \"" + safeTitle + "\"}]");
+        }
+
+        // АДРЕСА (ДОБАВЛЕНО!)
+        if (!lc.addresses.isEmpty()) {
+            QStringList addresses;
+            for (int i = 0; i < lc.addresses.size(); ++i) {
+                QString a = lc.addresses[i]; a.replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
+                addresses.append("{\"streetAddress\": \"" + a + "\"}");
+            }
+            jsonParts.append("\"addresses\":[" + addresses.join(",") + "]");
+        }
+
+        // ДЕНЬ РОЖДЕНИЯ (ДОБАВЛЕНО!)
+        if (!lc.birthday.isEmpty()) {
+            QStringList parts = lc.birthday.split("-");
+            if (parts.size() == 3) {
+                QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
+                                   .arg(parts[0]).arg(parts[1]).arg(parts[2]);
+                jsonParts.append(bdayJson);
+            }
+        }
+
+        // ЗАМЕТКИ (ДОБАВЛЕНО!)
+        if (!lc.notes.isEmpty()) {
+            QString safeNotes = lc.notes; safeNotes.replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
+            jsonParts.append("\"biographies\":[{\"value\": \"" + safeNotes + "\"}]");
+        }
+
+        // Собираем всё в одну строку
+        QString json = "{" + jsonParts.join(",") + "}";
 
     QNetworkAccessManager net;
     QNetworkRequest req(QUrl("https://people.googleapis.com/v1/people:createContact"));
