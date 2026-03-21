@@ -58,7 +58,8 @@ TARGET.CAPABILITY = NetworkServices
     TARGET.EPOCHEAPSIZE = 0x40000 0x4000000
 
     # Подключаем нативные библиотеки Symbian для работы с контактами
-    LIBS += -lPbkEng -lcntmodel -leuser -lbafl -lmbedtls
+    LIBS +=  -lcntmodel -leuser -lbafl -lmbedtls
+    #-lPbkEng
 
     # Настройка автозапуска (копирование RSS файла в системную папку загрузки)
     startup_res.sources = startup.rss

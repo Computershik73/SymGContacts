@@ -9,14 +9,14 @@
 // === НАТИВНЫЕ SYMBIAN БИБЛИОТЕКИ ===
 #ifdef Q_OS_SYMBIAN
 #include <e32base.h>
-#include <app/cpbkcontactengine.h>
-#include <app/CPbkContactItem.h>
-#include <app/CPbkContactIter.h>
-#include <app/PbkFields.hrh>
+#include <cpbkcontactengine.h>
+#include <CPbkContactItem.h>
+#include <CPbkContactIter.h>
+#include <PbkFields.hrh>
 
-#include <app/PbkFields.hrh>      // Константы полей (EPbkFieldId...)
-#include <app/CPbkFieldsInfo.h>   // Описание полей
-#include <app/CPbkContactItem.h>  // Сам контакт
+#include <PbkFields.hrh>      // Константы полей (EPbkFieldId...)
+#include <CPbkFieldsInfo.h>   // Описание полей
+#include <CPbkContactItem.h>  // Сам контакт
 #include <QDesktopServices>
 #include <QTcpSocket>
 #include <QNetworkProxy>
@@ -26,7 +26,7 @@
 #include <QBuffer>
 #include <QDir>
 #include <cntdef.h>    // Для TContactItemAttr и KContactFixed
-#include <app/cntitem.h>   // Для CContactItem
+#include <cntitem.h>   // Для CContactItem
 #include <e32std.h>
 #include <sys/time.h>
 
@@ -179,13 +179,14 @@ QString SyncThread::calculateHashLocal(const LocalContact &lc)
     emails.sort();
 
     // Хэшируем только контент
-    QString raw = QString("%1|%2|%3|%4|%5|%6")
+    QString raw = QString("%1|%2|%3|%4|%5|%6|%7")
             .arg(lc.firstName.trimmed().toLower())
             .arg(lc.lastName.trimmed().toLower())
             .arg(phones.join(","))
             .arg(emails.join(","))
             .arg(lc.company.trimmed().toLower())
-            .arg(lc.jobTitle.trimmed().toLower());
+            .arg(lc.jobTitle.trimmed().toLower())
+            .arg(lc.birthday);
 
     // ВАЖНЫЙ ДЕБАГ: выведите это в консоль
     qDebug() << "[HASH-LOCAL] raw:" << raw;
@@ -203,13 +204,22 @@ QString SyncThread::calculateHash(const GoogleContact &gc)
     QStringList emails = gc.emails;
     emails.sort();
 
-    QString raw = QString("%1|%2|%3|%4|%5|%6")
+    QString bday = "";
+    if (gc.birthday.year != 0 || gc.birthday.month != 0 || gc.birthday.day != 0) {
+        bday = QString("%1-%2-%3")
+                .arg(gc.birthday.year) // int
+                .arg(gc.birthday.month, 2, 10, QChar('0')) // uint -> QString
+                .arg(gc.birthday.day, 2, 10, QChar('0'));   // uint -> QString
+    }
+
+    QString raw = QString("%1|%2|%3|%4|%5|%6|%7")
             .arg(gc.firstName.trimmed().toLower())
             .arg(gc.lastName.trimmed().toLower())
             .arg(phones.join(","))
             .arg(emails.join(","))
             .arg(gc.company.trimmed().toLower())
-            .arg(gc.jobTitle.trimmed().toLower());
+            .arg(gc.jobTitle.trimmed().toLower())
+            .arg(bday);
 
     QByteArray hash = QCryptographicHash::hash(raw.toUtf8(), QCryptographicHash::Sha1);
     return QString::fromLatin1(hash.toHex());
@@ -256,6 +266,9 @@ void SyncThread::applyGoogleDataToLocal(const GoogleContact &gc, LocalContact &l
     // RemoteId должен быть уже задан в lc перед вызовом
 }
 
+
+
+
 void SyncThread::saveSyncState(const QMap<QString, QString>& etags, const QMap<QString, QString>& hashes)
 {
     // Используем прямой путь к папке данных приложения
@@ -299,116 +312,21 @@ SyncState SyncThread::loadSyncState()
                 currentSection = "etags";
             } else if (line == "[HASHES]") {
                 currentSection = "hashes";
-            } else if (line.contains("=")) {
-                QStringList parts = line.split("=");
-                if (parts.size() == 2) {
-                    if (currentSection == "etags") state.etags[parts[0]] = parts[1];
-                    else if (currentSection == "hashes") state.hashes[parts[0]] = parts[1];
+            } else {
+                // Ищем только ПЕРВЫЙ знак равно
+                int eqIdx = line.indexOf("=");
+                if (eqIdx != -1) {
+                    QString key = line.left(eqIdx).trimmed();
+                    QString val = line.mid(eqIdx + 1).trimmed(); // Берем всё, что после первого '='
+
+                    if (currentSection == "etags") state.etags[key] = val;
+                    else if (currentSection == "hashes") state.hashes[key] = val;
                 }
             }
         }
         file.close();
     }
     return state;
-}
-
-// =======================================================================
-// УМНЫЕ ХЕЛПЕРЫ ДЛЯ РЕДАКТИРОВАНИЯ ПОЛЕЙ "ПО МЕСТУ"
-// =======================================================================
-
-void SyncThread::SmartSetSingleFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aValue, const CPbkFieldsInfo& aFieldsInfo)
-{
-    TPbkContactItemField* field = aItem->FindField(aFieldId);
-
-    if (aValue.isEmpty()) {
-        // Если из Google пришла пустота, а поле есть - удаляем его
-        if (field) {
-            for (int k = 0; k < aItem->CardFields().Count(); ++k) {
-                if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
-                    aItem->RemoveField(k);
-                    break;
-                }
-            }
-        }
-    } else {
-        // Обновляем текст, если поле есть, или создаем новое
-        if (field) {
-            field->TextStorage()->SetTextL(ToSymbianStr(aValue));
-        } else {
-            CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-            if (info) aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValue));
-        }
-    }
-}
-
-void SyncThread::SmartSetMultiFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStringList& aValues, const CPbkFieldsInfo& aFieldsInfo)
-{
-    // 1. Собираем индексы всех существующих полей данного типа в контакте
-    QList<int> existingIndices;
-    for (int k = 0; k < aItem->CardFields().Count(); ++k) {
-        if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
-            existingIndices.append(k);
-        }
-    }
-
-    int googleCount = aValues.size();
-    int symbianCount = existingIndices.size();
-
-    // 2. ОБНОВЛЯЕМ существующие пересекающиеся поля
-    int minCount = qMin(googleCount, symbianCount);
-    for (int i = 0; i < minCount; ++i) {
-        aItem->CardFields()[existingIndices[i]].TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
-    }
-
-    // 3. ДОБАВЛЯЕМ новые поля, если в Google их больше
-    if (googleCount > symbianCount) {
-        CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-        if (info) {
-            for (int i = symbianCount; i < googleCount; ++i) {
-                if (!aValues[i].isEmpty()) {
-                    aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
-                }
-            }
-        }
-    }
-
-    // 4. УДАЛЯЕМ лишние поля с конца, если в Google их стало меньше
-    // ВАЖНО: Удалять элементы из массива нужно строго с конца (с максимального индекса),
-    // чтобы индексы остальных элементов не "съехали".
-    if (symbianCount > googleCount) {
-        for (int i = symbianCount - 1; i >= googleCount; --i) {
-            aItem->RemoveField(existingIndices[i]);
-        }
-    }
-}
-
-void SyncThread::SmartSetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aDateStr, const CPbkFieldsInfo& aFieldsInfo)
-{
-    TPbkContactItemField* field = aItem->FindField(aFieldId);
-
-    if (aDateStr.isEmpty()) {
-        if (field) {
-            for (int k = 0; k < aItem->CardFields().Count(); ++k) {
-                if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
-                    aItem->RemoveField(k);
-                    break;
-                }
-            }
-        }
-    } else {
-        QStringList parts = aDateStr.split("-");
-        if (parts.size() == 3) {
-            TDateTime dt(parts[0].toInt(), (TMonth)(parts[1].toInt() - 1), parts[2].toInt() - 1, 0, 0, 0, 0);
-            TTime time(dt);
-
-            if (field) {
-                field->DateTimeStorage()->SetTime(time);
-            } else {
-                CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-                if (info) aItem->AddFieldL(*info).DateTimeStorage()->SetTime(time);
-            }
-        }
-    }
 }
 
 void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleContact> &contactsList)
@@ -586,8 +504,11 @@ bool SyncThread::updateGoogleContact(const QString &accessToken, const LocalCont
     if (!localContact.birthday.isEmpty()) {
         QStringList parts = localContact.birthday.split("-");
         if (parts.size() == 3) {
+            // Превращаем "01" в "1" с помощью .toInt()
             QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
-                               .arg(parts[0]).arg(parts[1]).arg(parts[2]);
+                    .arg(parts[0].toInt())
+                    .arg(parts[1].toInt())
+                    .arg(parts[2].toInt());
             jsonParts.append(bdayJson);
         }
     }
@@ -607,7 +528,7 @@ bool SyncThread::updateGoogleContact(const QString &accessToken, const LocalCont
 
     // ВАЖНО: Разрешаем Google обновлять ВСЕ эти поля!
     QString url = "https://people.googleapis.com/v1/" + resourceId +
-                  ":updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,addresses,organizations,birthdays,biographies";
+            ":updateContact?updatePersonFields=names,phoneNumbers,emailAddresses,addresses,organizations,birthdays,biographies";
     QUrl qurll(url);
     QNetworkRequest req(qurll);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -985,13 +906,13 @@ void SyncThread::readSymbianContacts(QList<LocalContact> &list, CContactDatabase
           qDebug() << "[READ] Открытие CContactDatabase...";
             //  CContactDatabase* db = NULL;
             /* TRAPD(openErr, db = CContactDatabase::OpenL());
-                            if (openErr == KErrNotFound) {
-                                qDebug() << "[READ] База не найдена, создаем новую...";
-                                db = CContactDatabase::CreateL();
-                            } else {
-                                User::LeaveIfError(openErr);
-                            }
-                            CleanupStack::PushL(db);*/
+                                    if (openErr == KErrNotFound) {
+                                        qDebug() << "[READ] База не найдена, создаем новую...";
+                                        db = CContactDatabase::CreateL();
+                                    } else {
+                                        User::LeaveIfError(openErr);
+                                    }
+                                    CleanupStack::PushL(db);*/
 
             qDebug() << "[READ] Создание итератора...";
     TContactIter iter(*aDb);
@@ -1112,66 +1033,66 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
     QStringList jsonParts;
 
 
-        // ИМЕНА
-        QString safeFirstName = lc.firstName; safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-        QString safeLastName = lc.lastName; safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-        jsonParts.append("\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}]");
+    // ИМЕНА
+    QString safeFirstName = lc.firstName; safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    QString safeLastName = lc.lastName; safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    jsonParts.append("\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}]");
 
-        // ТЕЛЕФОНЫ
-        if (!lc.phones.isEmpty()) {
-            QStringList phones;
-            for (int i = 0; i < lc.phones.size(); ++i) {
-                QString p = lc.phones[i]; p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
-                phones.append("{\"value\": \"" + p + "\"}");
-            }
-            jsonParts.append("\"phoneNumbers\":[" + phones.join(",") + "]");
+    // ТЕЛЕФОНЫ
+    if (!lc.phones.isEmpty()) {
+        QStringList phones;
+        for (int i = 0; i < lc.phones.size(); ++i) {
+            QString p = lc.phones[i]; p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            phones.append("{\"value\": \"" + p + "\"}");
         }
+        jsonParts.append("\"phoneNumbers\":[" + phones.join(",") + "]");
+    }
 
-        // EMAIL (ДОБАВЛЕНО!)
-        if (!lc.emails.isEmpty()) {
-            QStringList emails;
-            for (int i = 0; i < lc.emails.size(); ++i) {
-                QString e = lc.emails[i]; e.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
-                emails.append("{\"value\": \"" + e + "\"}");
-            }
-            jsonParts.append("\"emailAddresses\":[" + emails.join(",") + "]");
+    // EMAIL (ДОБАВЛЕНО!)
+    if (!lc.emails.isEmpty()) {
+        QStringList emails;
+        for (int i = 0; i < lc.emails.size(); ++i) {
+            QString e = lc.emails[i]; e.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            emails.append("{\"value\": \"" + e + "\"}");
         }
+        jsonParts.append("\"emailAddresses\":[" + emails.join(",") + "]");
+    }
 
-        // КОМПАНИЯ И ДОЛЖНОСТЬ (ДОБАВЛЕНО!)
-        if (!lc.company.isEmpty() || !lc.jobTitle.isEmpty()) {
-            QString safeCompany = lc.company; safeCompany.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-            QString safeTitle = lc.jobTitle; safeTitle.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
-            jsonParts.append("\"organizations\":[{\"name\": \"" + safeCompany + "\", \"title\": \"" + safeTitle + "\"}]");
+    // КОМПАНИЯ И ДОЛЖНОСТЬ (ДОБАВЛЕНО!)
+    if (!lc.company.isEmpty() || !lc.jobTitle.isEmpty()) {
+        QString safeCompany = lc.company; safeCompany.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        QString safeTitle = lc.jobTitle; safeTitle.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        jsonParts.append("\"organizations\":[{\"name\": \"" + safeCompany + "\", \"title\": \"" + safeTitle + "\"}]");
+    }
+
+    // АДРЕСА (ДОБАВЛЕНО!)
+    if (!lc.addresses.isEmpty()) {
+        QStringList addresses;
+        for (int i = 0; i < lc.addresses.size(); ++i) {
+            QString a = lc.addresses[i]; a.replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
+            addresses.append("{\"streetAddress\": \"" + a + "\"}");
         }
+        jsonParts.append("\"addresses\":[" + addresses.join(",") + "]");
+    }
 
-        // АДРЕСА (ДОБАВЛЕНО!)
-        if (!lc.addresses.isEmpty()) {
-            QStringList addresses;
-            for (int i = 0; i < lc.addresses.size(); ++i) {
-                QString a = lc.addresses[i]; a.replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
-                addresses.append("{\"streetAddress\": \"" + a + "\"}");
-            }
-            jsonParts.append("\"addresses\":[" + addresses.join(",") + "]");
+    // ДЕНЬ РОЖДЕНИЯ (ДОБАВЛЕНО!)
+    if (!lc.birthday.isEmpty()) {
+        QStringList parts = lc.birthday.split("-");
+        if (parts.size() == 3) {
+            QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
+                    .arg(parts[0]).arg(parts[1]).arg(parts[2]);
+            jsonParts.append(bdayJson);
         }
+    }
 
-        // ДЕНЬ РОЖДЕНИЯ (ДОБАВЛЕНО!)
-        if (!lc.birthday.isEmpty()) {
-            QStringList parts = lc.birthday.split("-");
-            if (parts.size() == 3) {
-                QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
-                                   .arg(parts[0]).arg(parts[1]).arg(parts[2]);
-                jsonParts.append(bdayJson);
-            }
-        }
+    // ЗАМЕТКИ (ДОБАВЛЕНО!)
+    if (!lc.notes.isEmpty()) {
+        QString safeNotes = lc.notes; safeNotes.replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
+        jsonParts.append("\"biographies\":[{\"value\": \"" + safeNotes + "\"}]");
+    }
 
-        // ЗАМЕТКИ (ДОБАВЛЕНО!)
-        if (!lc.notes.isEmpty()) {
-            QString safeNotes = lc.notes; safeNotes.replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
-            jsonParts.append("\"biographies\":[{\"value\": \"" + safeNotes + "\"}]");
-        }
-
-        // Собираем всё в одну строку
-        QString json = "{" + jsonParts.join(",") + "}";
+    // Собираем всё в одну строку
+    QString json = "{" + jsonParts.join(",") + "}";
 
     QNetworkAccessManager net;
     QNetworkRequest req(QUrl("https://people.googleapis.com/v1/people:createContact"));
@@ -1192,68 +1113,6 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
     return root.property("resourceName").toString();
 }
 
-
-
-// =======================================================================
-// УНИВЕРСАЛЬНЫЕ ХЕЛПЕРЫ ДЛЯ ЗАПИСИ ПОЛЕЙ В SYMBIAN
-// =======================================================================
-
-void SyncThread::SetSingleFieldL(CPbkContactItem* aItem, TInt aFieldId, const TDesC& aValue, const CPbkFieldsInfo& aFieldsInfo)
-{
-    if (aValue.Length() == 0) return;
-
-    TPbkContactItemField* field = aItem->FindField(aFieldId);
-    if (field) {
-        field->TextStorage()->SetTextL(aValue);
-    } else {
-        CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-        if (info) {
-            aItem->AddFieldL(*info).TextStorage()->SetTextL(aValue);
-        }
-    }
-}
-
-void SyncThread::SetMultiFieldL(CPbkContactItem* aItem, TInt aFieldId, const QStringList& aValues, const CPbkFieldsInfo& aFieldsInfo)
-{
-    // 1. Очищаем все старые поля этого типа, чтобы избежать ошибки -14 и дублей
-    for (int k = aItem->CardFields().Count() - 1; k >= 0; --k) {
-        if (aItem->CardFields()[k].FieldInfo().FieldId() == aFieldId) {
-            aItem->RemoveField(k);
-        }
-    }
-
-    // 2. Добавляем новые из списка
-    CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-    if (info) {
-        for (int i = 0; i < aValues.size(); ++i) {
-            if (!aValues[i].isEmpty()) {
-                aItem->AddFieldL(*info).TextStorage()->SetTextL(ToSymbianStr(aValues[i]));
-            }
-        }
-    }
-}
-
-void SyncThread::SetDateFieldL(CPbkContactItem* aItem, TInt aFieldId, const QString& aDateStr, const CPbkFieldsInfo& aFieldsInfo)
-{
-    if (aDateStr.isEmpty()) return;
-
-    QStringList parts = aDateStr.split("-");
-    if (parts.size() == 3) {
-        // Symbian использует месяцы 0-11 и дни 0-30
-        TDateTime dt(parts[0].toInt(), (TMonth)(parts[1].toInt() - 1), parts[2].toInt() - 1, 0, 0, 0, 0);
-        TTime time(dt);
-
-        TPbkContactItemField* field = aItem->FindField(aFieldId);
-        if (field) {
-            field->DateTimeStorage()->SetTime(time);
-        } else {
-            CPbkFieldInfo* info = aFieldsInfo.Find(aFieldId);
-            if (info) {
-                aItem->AddFieldL(*info).DateTimeStorage()->SetTime(time);
-            }
-        }
-    }
-}
 
 #define SET_SINGLE_FIELD(FieldUid, VcardMap, Value) \
 { \
@@ -1364,7 +1223,7 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
         SET_MULTI_FIELD(KUidContactFieldUrl, KUidContactFieldVCardMapURL, lc.urls);
 
         // 10. ДЕНЬ РОЖДЕНИЯ
-        /* qDebug() << "[SAVE] Добавление Дня рождения...";
+        qDebug() << "[SAVE] Добавление Дня рождения...";
         if (!lc.birthday.isEmpty()) {
             QStringList parts = lc.birthday.split("-");
             if (parts.size() == 3) {
@@ -1375,9 +1234,9 @@ void SyncThread::saveSymbianContacts(const QList<LocalContact> &toSave, CContact
                 bdayField->SetMapping(KUidContactFieldVCardMapBDAY);
                 bdayField->DateTimeStorage()->SetTime(time);
                 item->AddFieldL(*bdayField);
-                //CleanupStack::PopAndDestroy(bdayField);
+                // CleanupStack::Pop(bdayField);
             }
-        }*/
+        }
 
         // --- СОХРАНЕНИЕ ---
         if (isNew) {

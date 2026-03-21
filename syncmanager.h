@@ -11,6 +11,18 @@
 #include <e32std.h> // Базовые типы Symbian (TInt, TDesC и т.д.)
 #endif
 
+// "Слепок" состояния одного контакта после последней синхронизации
+struct SyncStateEntry {
+    QString etag;
+    QString hash;
+    // Сохраняем списки полей как строки через запятую
+    QString phones;
+    QString emails;
+    QString addresses;
+    QString urls;
+};
+
+
 class SyncState {
 public:
     QMap<QString, QString> etags;
@@ -21,7 +33,7 @@ struct GDate {
     int year;
     int month;
     int day;
-
+    GDate() : year(0), month(0), day(0) {}
     // Вспомогательный метод для проверки, пустая ли дата (если Google прислал только месяц и день)
     bool isEmpty() const {
         return (year == 0 && month == 0 && day == 0);
@@ -79,15 +91,7 @@ private:
     bool doDeviceAuthFlow();
     void executeSync(const QString &accessToken);
     QString CleanPhone(const QString& phone);
-#ifdef Q_OS_SYMBIAN
-    // Хелперы для работы с контактами Symbian
-    void SetSingleFieldL(class CPbkContactItem* aItem, int aFieldId, const TDesC& aValue, const class CPbkFieldsInfo& aFieldsInfo);
-    void SetMultiFieldL(class CPbkContactItem* aItem, int aFieldId, const QStringList& aValues, const class CPbkFieldsInfo& aFieldsInfo);
-    void SetDateFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aDateStr, const class CPbkFieldsInfo& aFieldsInfo);
-    void SmartSetSingleFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aValue, const class CPbkFieldsInfo& aFieldsInfo);
-    void SmartSetMultiFieldL(class CPbkContactItem* aItem, int aFieldId, const QStringList& aValues, const class CPbkFieldsInfo& aFieldsInfo);
-    void SmartSetDateFieldL(class CPbkContactItem* aItem, int aFieldId, const QString& aDateStr, const class CPbkFieldsInfo& aFieldsInfo);
-#endif
+
     // Мосты для нативного Symbian API
     void readSymbianContacts(QList<LocalContact> &list, class CContactDatabase* aDb);
     void saveSymbianContacts(const QList<LocalContact> &toSave, class CContactDatabase* aDb);
