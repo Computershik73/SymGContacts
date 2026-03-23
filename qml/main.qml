@@ -41,11 +41,11 @@ Rectangle {
             
             Rectangle { width: parent.width; height: 40; color: "white"; radius: 5
                 TextInput { id: clientIdInput; anchors.fill: parent; anchors.margins: 5; font.pixelSize: 16; text: 
-"152824189610-qr6octjqoo9elmreo6463a3qf8l4uqjl.apps.googleusercontent.com"; color: "black"; }
+""; color: "black"; }
             }
             Rectangle { width: parent.width; height: 40; color: "white"; radius: 5
                 TextInput { id: clientSecretInput; anchors.fill: parent; anchors.margins: 5; font.pixelSize: 16; text: 
-"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"; color: "black"; }
+""; color: "black"; }
             }
             Rectangle {
                 id: syncBtn
