@@ -102,9 +102,15 @@ private:
     void applyGoogleDataToLocal(const GoogleContact &gc, LocalContact &lc);
     void saveSyncState(const QMap<QString, QString>& etags, const QMap<QString, QString>& hashes);
     SyncState loadSyncState();
+    // Google API
     void fetchGoogleContacts(const QString &accessToken, QList<GoogleContact> &contactsList);
     bool deleteGoogleContact(const QString &accessToken, const QString &resourceName);
     bool updateGoogleContact(const QString &accessToken, const LocalContact &localContact, const QString &etag);
+    QString buildPersonJson(const LocalContact &lc, const QString &etag = "");
+
+    // Пакетные методы API
+    int batchCreateGoogleContacts(const QString &accessToken, QList<LocalContact> &contactsList, const QList<int> &indices);
+    int batchUpdateGoogleContacts(const QString &accessToken, QList<LocalContact> &contactsList, const QList<int> &indices, const QMap<QString, QString> &etagsMap);
 };
 
 class SyncManager : public QObject
@@ -121,6 +127,7 @@ public:
         return !settings.value("refreshToken").toString().isEmpty();
     }
     Q_INVOKABLE void startAuthAndSync(const QString &clientId, const QString &clientSecret);
+    Q_INVOKABLE void logout();
 
 public slots:
     Q_INVOKABLE void startSyncOnly();
@@ -129,6 +136,7 @@ signals:
     void progressUpdated(const QString &message);
     void authCodeReceived(const QString &userCode, const QString &verificationUrl);
     void syncFinished(bool success, const QString &message);
+    void authStatusChanged(bool isLoggedIn);
 
 private:
 

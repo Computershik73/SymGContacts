@@ -1,115 +1,101 @@
 import QtQuick 1.0
 
 Rectangle {
+    id: root
     width: 360
     height: 640
-    color: "#001e36" // Глубокий синий (Windows/Metro стиль)
-	property bool isLoggedIn: syncManager.hasToken()
-	id: root 
+    color: "#001e36"
 	
+	property bool isPortrait: root.width < root.height
+    
+    // Делаем состояние реактивным
+    property bool isLoggedIn: syncManager.hasToken()
+    
     Column {
-		
         anchors.centerIn: parent
-        spacing: 20
+		
+		spacing: root.isPortrait ? 20 : 10 
         width: parent.width * 0.9
 
         Text {
-            text: "Синхронизация Google"
+            text: "SymGContacts"
             font.pixelSize: 26
             color: "white"
             font.bold: true
             anchors.horizontalCenter: parent.horizontalCenter
         }
-
-        Rectangle {
-            width: parent.width
-            height: 40
+		
+		Text {
+            text: "by Computershik @ 4pda"
+            font.pixelSize: 20
             color: "white"
-            radius: 5
-            TextInput {
-                id: clientIdInput
-                anchors.fill: parent
-                anchors.margins: 5
-                font.pixelSize: 16
-                text: "152824189610-qr6octjqoo9elmreo6463a3qf8l4uqjl.apps.googleusercontent.com"
-                color: "black"
-                selectByMouse: true
-            }
+            font.bold: true
+            anchors.horizontalCenter: parent.horizontalCenter
         }
 
-        Rectangle {
+        // --- БЛОК ВХОДА (показывается, если НЕ залогинены) ---
+        Column {
             width: parent.width
-            height: 40
-            color: "white"
-            radius: 5
-            TextInput {
-                id: clientSecretInput
-                anchors.fill: parent
-                anchors.margins: 5
-                font.pixelSize: 16
-                text: "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"
-                color: "black"
-                selectByMouse: true
+            spacing: 20
+            visible: !root.isLoggedIn
+            
+            Rectangle { width: parent.width; height: 40; color: "white"; radius: 5
+                TextInput { id: clientIdInput; anchors.fill: parent; anchors.margins: 5; font.pixelSize: 16; text: 
+"152824189610-qr6octjqoo9elmreo6463a3qf8l4uqjl.apps.googleusercontent.com"; color: "black"; }
             }
-        }
-
-        Rectangle {
+            Rectangle { width: parent.width; height: 40; color: "white"; radius: 5
+                TextInput { id: clientSecretInput; anchors.fill: parent; anchors.margins: 5; font.pixelSize: 16; text: 
+"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"; color: "black"; }
+            }
+            Rectangle {
+                id: syncBtn
+                width: parent.width; height: 50; color: "#0078D7"; radius: 5
+                Text { text: "Войти и Синхронизировать"; color: "white"; font.pixelSize: 18; anchors.centerIn: parent }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: syncManager.startAuthAndSync(clientIdInput.text, clientSecretInput.text)
+                }
+            }
+			
+			Rectangle {
             id: authCodeContainer
             width: parent.width
-            height: 80
+            height: 120
             color: "#333333"
-            visible: false
+            visible: false // Скрыт до получения кода
             radius: 5
             Column {
                 anchors.centerIn: parent
-                Text { text: "Введите код в браузере:"; color: "white"; font.pixelSize: 14 }
-                Text { id: authCodeText; text: "ABCD"; color: "#ff9900"; font.pixelSize: 24; font.bold: true }
+                Text { text: "Код для Google:"; color: "white"; font.pixelSize: 14 }
+                Text { id: authCodeText; text: "---"; color: "#ff9900"; font.pixelSize: 24; font.bold: true }
+                Text { text: "Введите этот код в браузере в google.com/device"; wrapMode: Text.Wrap; color: "#aaaaaa"; font.pixelSize: 12 }
             }
+			}
         }
 
-        Rectangle {
-			visible: !root.isLoggedIn
-            id: syncBtn
+        // --- БЛОК СИНХРОНИЗАЦИИ (показывается, если ЗАЛОГИНЕНЫ) ---
+        Column {
             width: parent.width
-            height: 50
-            color: "#0078D7"
-            radius: 5
-            Text {
-                text: "Войти и Синхронизировать"
-                color: "white"
-                font.pixelSize: 18
-                anchors.centerIn: parent
-            }
-            MouseArea {
-                anchors.fill: parent
-                onClicked: {
-                    syncBtn.opacity = 0.5
-                    statusText.text = "Запуск..."
-                    // Вызов C++ метода
-                    syncManager.startAuthAndSync(clientIdInput.text, clientSecretInput.text);
+            spacing: 20
+            visible: root.isLoggedIn
+            
+            Rectangle {
+                id: syncreadyBtn
+                width: parent.width; height: 50; color: "#0078D7"; radius: 5
+                Text { text: "Синхронизировать"; color: "white"; font.pixelSize: 18; anchors.centerIn: parent }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: syncManager.startSyncOnly()
                 }
             }
-        }
-		Rectangle {
-			visible: root.isLoggedIn
-            id: syncreadyBtn
-            width: parent.width
-            height: 50
-            color: "#0078D7"
-            radius: 5
-            Text {
-                text: "Синхронизировать"
-                color: "white"
-                font.pixelSize: 18
-                anchors.centerIn: parent
-            }
-            MouseArea {
-                anchors.fill: parent
-                onClicked: {
-                    syncBtn.opacity = 0.5
-                    statusText.text = "Запуск..."
-                    // Вызов C++ метода
-                    syncManager.startSyncOnly()
+            
+            // НОВАЯ КНОПКА ВЫХОДА
+            Rectangle {
+                width: parent.width; height: 50; color: "#d9534f"; radius: 5
+                Text { text: "Выйти из аккаунта"; color: "white"; font.pixelSize: 18; anchors.centerIn: parent }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: syncManager.logout()
                 }
             }
         }
@@ -117,28 +103,20 @@ Rectangle {
         Text {
             id: statusText
             text: ""
-            color: "#00ff00"
-            font.pixelSize: 16
+            color: "white"
+            font.pixelSize: 14
             wrapMode: Text.WordWrap
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
         }
     }
 
-    // Соединяем сигналы из C++ с функциями в QML
     Connections {
         target: syncManager
-        onProgressUpdated: {
-            statusText.text = message;
-        }
-        onAuthCodeReceived: {
-            authCodeContainer.visible = true;
-            authCodeText.text = userCode;
-        }
-        onSyncFinished: {
-            statusText.text = message;
-            syncBtn.opacity = 1.0;
-            authCodeContainer.visible = false;
-        }
+        onProgressUpdated: statusText.text = message
+        onAuthCodeReceived: { authCodeContainer.visible = true; authCodeText.text = userCode; }
+        onSyncFinished: { statusText.text = message; }
+        // РЕАГИРУЕМ НА ВЫХОД
+        onAuthStatusChanged: { root.isLoggedIn = isLoggedIn; syncManager.startAuthAndSync(clientIdInput.text, clientSecretInput.text) }
     }
 }

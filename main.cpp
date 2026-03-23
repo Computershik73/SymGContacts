@@ -12,6 +12,8 @@
 #include "localsslproxy.h"
 #include <QFile>
 #include <QTextStream>
+#include <QtNetwork/QNetworkConfigurationManager>
+#include <QtNetwork/QNetworkSession>
 
 void myMessageOutput(QtMsgType type, const char *msg)
 {
@@ -83,14 +85,23 @@ int main(int argc, char *argv[])
         }
     }
 
+
+    QmlApplicationViewer view;
     // Создаем интерфейс только если приложение запустил пользователь вручную
-    QDeclarativeView *view = new QDeclarativeView();
-    view->rootContext()->setContextProperty("syncManager", &syncManager);
-    view->setSource(QUrl("qrc:/qml/main.qml"));
+    view.setResizeMode(QDeclarativeView::SizeRootObjectToView);
+    view.rootContext()->setContextProperty("syncManager", &syncManager);
+    view.setSource(QUrl("qrc:/qml/main.qml"));
 
     if (!isAutostart) {
-        view->showFullScreen();
+        view.showFullScreen();
     }
+
+    QNetworkConfigurationManager manager;
+        if (manager.capabilities() & QNetworkConfigurationManager::NetworkSessionRequired) {
+            QNetworkConfiguration config = manager.defaultConfiguration();
+            QNetworkSession* networkSession = new QNetworkSession(config);
+            networkSession->open();
+        }
 
     return app.exec();
 }

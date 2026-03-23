@@ -94,6 +94,23 @@ void SyncManager::startSyncOnly()
     m_thread->start();
 }
 
+void SyncManager::logout()
+{
+    // 1. Удаляем токен из настроек
+    QSettings settings(QDesktopServices::storageLocation(QDesktopServices::DataLocation) + "/wpgcontacts.ini", QSettings::IniFormat);
+    settings.remove("refreshToken");
+    settings.remove("clientId");
+    settings.remove("clientSecret");
+    settings.sync();
+
+    // 2. Удаляем файл состояния (память синхронизации)
+    QFile file(QDesktopServices::storageLocation(QDesktopServices::DataLocation) + "/sync_state_v2.txt");
+    if (file.exists()) file.remove();
+
+    // 3. Сообщаем QML, что мы больше не залогинены
+    emit authStatusChanged(false);
+}
+
 SyncThread::SyncThread(SyncManager *parent) : QThread(parent), m_parent(parent) {
 
 }
@@ -161,7 +178,7 @@ void SyncThread::run()
         emit m_parent->syncFinished(false, "Не удалось обновить токен Google.");
         return;
     }
-
+    emit m_parent->authStatusChanged(true);
     // Запускаем основную логику
     executeSync(accessToken);
     //  localProxy.close();
@@ -338,7 +355,7 @@ void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleCon
     while (hasMorePages) {
         // Запрашиваем поля: имена, телефоны, email, адреса, URL, дни рождения, организации, заметки
         QString requestUri = "https://people.googleapis.com/v1/people/me/connections?"
-                "personFields=names,phoneNumbers,emailAddresses,addresses,urls,birthdays,organizations,biographies&pageSize=1000";
+                "personFields=names,phoneNumbers,emailAddresses,addresses,urls,birthdays,organizations,biographies&pageSize=100";
 
         if (!nextPageToken.isEmpty()) {
             requestUri += "&pageToken=" + nextPageToken;
@@ -353,96 +370,102 @@ void SyncThread::fetchGoogleContacts(const QString &accessToken, QList<GoogleCon
         if (reply->error() == QNetworkReply::NoError) {
             QScriptEngine engine;
             QScriptValue root = engine.evaluate("(" + jsonStr + ")");
-
-            if (root.property("connections").isArray()) {
-                QScriptValue connections = root.property("connections");
-                int len = connections.property("length").toInt32();
-
-                for (int i = 0; i < len; ++i) {
-                    QScriptValue person = connections.property(i);
-                    GoogleContact gc;
-
-                    gc.id = person.property("resourceName").toString();
-                    gc.etag = person.property("etag").toString();
-
-                    // 1. Имена
-                    QScriptValue names = person.property("names");
-                    if (names.isArray() && names.property("length").toInt32() > 0) {
-                        gc.firstName = names.property(0).property("givenName").toString();
-                        gc.lastName = names.property(0).property("familyName").toString();
-                    }
-
-                    // 2. Телефоны
-                    QScriptValue phones = person.property("phoneNumbers");
-                    if (phones.isArray()) {
-                        int count = phones.property("length").toInt32();
-                        for (int j = 0; j < count; ++j)
-                            gc.phones.append(phones.property(j).property("value").toString());
-                    }
-
-                    // 3. Emails
-                    QScriptValue emails = person.property("emailAddresses");
-                    if (emails.isArray()) {
-                        int count = emails.property("length").toInt32();
-                        for (int j = 0; j < count; ++j)
-                            gc.emails.append(emails.property(j).property("value").toString());
-                    }
-
-                    // 4. Адреса
-                    QScriptValue addresses = person.property("addresses");
-                    if (addresses.isArray()) {
-                        int count = addresses.property("length").toInt32();
-                        for (int j = 0; j < count; ++j)
-                            gc.addresses.append(addresses.property(j).property("formattedValue").toString());
-                    }
-
-                    // 5. URL / Соцсети
-                    QScriptValue urls = person.property("urls");
-                    if (urls.isArray()) {
-                        int count = urls.property("length").toInt32();
-                        for (int j = 0; j < count; ++j)
-                            gc.urls.append(urls.property(j).property("value").toString());
-                    }
-
-                    // 6. Организации (Компания и Должность)
-                    QScriptValue orgs = person.property("organizations");
-                    if (orgs.isArray() && orgs.property("length").toInt32() > 0) {
-                        QScriptValue org = orgs.property(0);
-                        gc.company = org.property("name").toString();
-                        gc.jobTitle = org.property("title").toString();
-                    }
-
-                    // 7. День рождения
-                    QScriptValue bdays = person.property("birthdays");
-                    if (bdays.isArray() && bdays.property("length").toInt32() > 0) {
-                        QScriptValue dateObj = bdays.property(0).property("date");
-                        if (dateObj.isObject()) {
-                            if (dateObj.property("year").isValid())
-                                gc.birthday.year = dateObj.property("year").toInt32();
-
-                            if (dateObj.property("month").isValid())
-                                gc.birthday.month = (uint)dateObj.property("month").toInt32();
-
-                            if (dateObj.property("day").isValid())
-                                gc.birthday.day = (uint)dateObj.property("day").toInt32();
+            if (!root.isObject()) {
+                            hasMorePages = false;
+                            continue;
                         }
-                    }
 
-                    // 8. Заметки (biographies)
-                    QScriptValue bios = person.property("biographies");
-                    if (bios.isArray() && bios.property("length").toInt32() > 0) {
-                        gc.notes = bios.property(0).property("value").toString();
-                    }
+            if (root.property("connections").isValid()) {
+                if (root.property("connections").isArray()) {
+                    QScriptValue connections = root.property("connections");
+                    int len = connections.property("length").toInt32();
 
-                    // Сохраняем в список, если есть хоть что-то
-                    if (!gc.firstName.isEmpty() || !gc.lastName.isEmpty() || !gc.phones.isEmpty() || !gc.emails.isEmpty()) {
-                        contactsList.append(gc);
+                    for (int i = 0; i < len; ++i) {
+                        QScriptValue person = connections.property(i);
+                        GoogleContact gc;
+
+                        gc.id = person.property("resourceName").toString();
+                        gc.etag = person.property("etag").toString();
+
+                        // 1. Имена
+                        QScriptValue names = person.property("names");
+                        if (names.isArray() && names.property("length").toInt32() > 0) {
+                            gc.firstName = names.property(0).property("givenName").toString();
+                            gc.lastName = names.property(0).property("familyName").toString();
+                        }
+
+                        // 2. Телефоны
+                        QScriptValue phones = person.property("phoneNumbers");
+                        if (phones.isArray()) {
+                            int count = phones.property("length").toInt32();
+                            for (int j = 0; j < count; ++j)
+                                gc.phones.append(phones.property(j).property("value").toString());
+                        }
+
+                        // 3. Emails
+                        QScriptValue emails = person.property("emailAddresses");
+                        if (emails.isArray()) {
+                            int count = emails.property("length").toInt32();
+                            for (int j = 0; j < count; ++j)
+                                gc.emails.append(emails.property(j).property("value").toString());
+                        }
+
+                        // 4. Адреса
+                        QScriptValue addresses = person.property("addresses");
+                        if (addresses.isArray()) {
+                            int count = addresses.property("length").toInt32();
+                            for (int j = 0; j < count; ++j)
+                                gc.addresses.append(addresses.property(j).property("formattedValue").toString());
+                        }
+
+                        // 5. URL / Соцсети
+                        QScriptValue urls = person.property("urls");
+                        if (urls.isArray()) {
+                            int count = urls.property("length").toInt32();
+                            for (int j = 0; j < count; ++j)
+                                gc.urls.append(urls.property(j).property("value").toString());
+                        }
+
+                        // 6. Организации (Компания и Должность)
+                        QScriptValue orgs = person.property("organizations");
+                        if (orgs.isArray() && orgs.property("length").toInt32() > 0) {
+                            QScriptValue org = orgs.property(0);
+                            gc.company = org.property("name").toString();
+                            gc.jobTitle = org.property("title").toString();
+                        }
+
+                        // 7. День рождения
+                        QScriptValue bdays = person.property("birthdays");
+                        if (bdays.isArray() && bdays.property("length").toInt32() > 0) {
+                            QScriptValue dateObj = bdays.property(0).property("date");
+                            if (dateObj.isObject()) {
+                                if (dateObj.property("year").isValid())
+                                    gc.birthday.year = dateObj.property("year").toInt32();
+
+                                if (dateObj.property("month").isValid())
+                                    gc.birthday.month = (uint)dateObj.property("month").toInt32();
+
+                                if (dateObj.property("day").isValid())
+                                    gc.birthday.day = (uint)dateObj.property("day").toInt32();
+                            }
+                        }
+
+                        // 8. Заметки (biographies)
+                        QScriptValue bios = person.property("biographies");
+                        if (bios.isArray() && bios.property("length").toInt32() > 0) {
+                            gc.notes = bios.property(0).property("value").toString();
+                        }
+
+                        // Сохраняем в список, если есть хоть что-то
+                        if (!gc.firstName.isEmpty() || !gc.lastName.isEmpty() || !gc.phones.isEmpty() || !gc.emails.isEmpty()) {
+                            contactsList.append(gc);
+                        }
                     }
                 }
             }
 
             // Проверка пагинации
-            if (root.property("nextPageToken").isValid()) {
+            if (root.property("nextPageToken").isValid() && !root.property("nextPageToken").isUndefined() && !root.property("nextPageToken").toString().isEmpty()) {
                 nextPageToken = root.property("nextPageToken").toString();
             } else {
                 hasMorePages = false;
@@ -567,13 +590,198 @@ bool SyncThread::deleteGoogleContact(const QString &accessToken, const QString &
 
     QString response = syncWait(reply);
 
-    if (reply->error() == QNetworkReply::NoError) {
-        qDebug() << "[OK] Удалено из Google:" << resourceName;
-        return true;
+    int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+    if (reply->error() == QNetworkReply::NoError || statusCode == 404) {
+        qDebug() << "[OK] Удалено из Google (или уже отсутствовало):" << resourceName;
+        return true; // Возвращаем true, чтобы контакт стерся из нашей "памяти"
     } else {
         qDebug() << "[ERROR] Удаление из Google:" << reply->errorString() << response;
         return false;
     }
+}
+
+// =======================================================================
+// ПАКЕТНАЯ (BATCH) ВЫГРУЗКА В GOOGLE API (СВЕРХБЫСТРО)
+// =======================================================================
+
+QString SyncThread::buildPersonJson(const LocalContact &lc, const QString &etag)
+{
+    QStringList jsonParts;
+    if (!etag.isEmpty()) {
+        jsonParts.append("\"etag\": \"" + etag + "\"");
+    }
+
+    QString safeFirstName = lc.firstName; safeFirstName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    QString safeLastName = lc.lastName; safeLastName.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+    jsonParts.append("\"names\":[{\"givenName\": \"" + safeFirstName + "\", \"familyName\": \"" + safeLastName + "\"}]");
+
+    if (!lc.phones.isEmpty()) {
+        QStringList phones;
+        for (int i = 0; i < lc.phones.size(); ++i) {
+            QString p = lc.phones[i]; p.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            phones.append("{\"value\": \"" + p + "\"}");
+        }
+        jsonParts.append("\"phoneNumbers\":[" + phones.join(",") + "]");
+    }
+
+    if (!lc.emails.isEmpty()) {
+        QStringList emails;
+        for (int i = 0; i < lc.emails.size(); ++i) {
+            QString e = lc.emails[i]; e.replace("\"", "\\\"").replace("\n", "").replace("\r", "");
+            emails.append("{\"value\": \"" + e + "\"}");
+        }
+        jsonParts.append("\"emailAddresses\":[" + emails.join(",") + "]");
+    }
+
+    if (!lc.company.isEmpty() || !lc.jobTitle.isEmpty()) {
+        QString safeCompany = lc.company; safeCompany.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        QString safeTitle = lc.jobTitle; safeTitle.replace("\"", "\\\"").replace("\n", " ").replace("\r", "");
+        jsonParts.append("\"organizations\":[{\"name\": \"" + safeCompany + "\", \"title\": \"" + safeTitle + "\"}]");
+    }
+
+    if (!lc.addresses.isEmpty()) {
+        QStringList addresses;
+        for (int i = 0; i < lc.addresses.size(); ++i) {
+            QString a = lc.addresses[i]; a.replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
+            addresses.append("{\"streetAddress\": \"" + a + "\"}");
+        }
+        jsonParts.append("\"addresses\":[" + addresses.join(",") + "]");
+    }
+
+    if (!lc.birthday.isEmpty()) {
+        QStringList parts = lc.birthday.split("-");
+        if (parts.size() == 3) {
+            QString bdayJson = QString("\"birthdays\":[{\"date\": {\"year\": %1, \"month\": %2, \"day\": %3}}]")
+                    .arg(parts[0].toInt()).arg(parts[1].toInt()).arg(parts[2].toInt());
+            jsonParts.append(bdayJson);
+        }
+    }
+
+    if (!lc.notes.isEmpty()) {
+        QString safeNotes = lc.notes; safeNotes.replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "");
+        jsonParts.append("\"biographies\":[{\"value\": \"" + safeNotes + "\"}]");
+    }
+
+    return "{" + jsonParts.join(",") + "}";
+}
+
+int SyncThread::batchCreateGoogleContacts(const QString &accessToken, QList<LocalContact> &contactsList, const QList<int> &indices)
+{
+    if (indices.isEmpty()) return 0;
+    int successCount = 0;
+    int batchSize = 100;
+
+    QNetworkAccessManager net;
+    QNetworkRequest req(QUrl("https://people.googleapis.com/v1/people:batchCreateContacts"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("Authorization", QString("Bearer " + accessToken).toUtf8());
+    req.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, false);
+
+    for (int i = 0; i < indices.size(); i += batchSize) {
+        int end = qMin(i + batchSize, indices.size());
+        QStringList contactsJsonArray;
+
+        for (int j = i; j < end; ++j) {
+            LocalContact &lc = contactsList[indices[j]];
+            contactsJsonArray.append("{\"contactPerson\": " + buildPersonJson(lc) + "}");
+        }
+
+        // ВАЖНО: Добавляем readMask! Без него Google вернет {}
+        QString reqJson = "{"
+                "\"contacts\": [" + contactsJsonArray.join(",") + "],"
+                "\"readMask\": \"names,phoneNumbers,emailAddresses,addresses,organizations,birthdays,biographies\""
+                "}";
+
+        QByteArray data = reqJson.toUtf8();
+        QBuffer *buffer = new QBuffer();
+        buffer->setData(data);
+        buffer->open(QIODevice::ReadOnly);
+
+        QNetworkReply *reply = net.post(req, buffer);
+        QString response = syncWait(reply);
+        buffer->deleteLater();
+
+        if (reply->error() == QNetworkReply::NoError) {
+            QScriptEngine engine;
+            QScriptValue root = engine.evaluate("(" + response + ")");
+            QScriptValue createdPeople = root.property("createdPeople");
+
+            if (createdPeople.isArray()) {
+                int len = createdPeople.property("length").toInt32();
+                for (int j = 0; j < len; ++j) {
+                    QScriptValue personItem = createdPeople.property(j).property("person");
+                    if (personItem.isValid()) {
+                        QString newId = personItem.property("resourceName").toString();
+                        if (!newId.isEmpty()) {
+                            // Присваиваем новые ID обратно
+                            contactsList[indices[i + j]].remoteId = newId;
+                            successCount++;
+                        }
+                    }
+                }
+            } else {
+                qDebug() << "[ERROR] createdPeople не является массивом. Ответ сервера:" << response;
+            }
+        } else {
+            qDebug() << "[ERROR] Batch Create Failed:" << response;
+        }
+        reply->deleteLater();
+    }
+    return successCount;
+}
+
+int SyncThread::batchUpdateGoogleContacts(const QString &accessToken, QList<LocalContact> &contactsList, const QList<int> &indices, const QMap<QString, QString> &etagsMap)
+{
+    if (indices.isEmpty()) return 0;
+    int successCount = 0;
+    int batchSize = 100;
+
+    QNetworkAccessManager net;
+    QNetworkRequest req(QUrl("https://people.googleapis.com/v1/people:batchUpdateContacts"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("Authorization", QString("Bearer " + accessToken).toUtf8());
+    req.setAttribute(QNetworkRequest::HttpPipeliningAllowedAttribute, false);
+
+    for (int i = 0; i < indices.size(); i += batchSize) {
+        int end = qMin(i + batchSize, indices.size());
+        QStringList contactsJsonMap;
+
+        for (int j = i; j < end; ++j) {
+            LocalContact &lc = contactsList[indices[j]];
+            QString etag = etagsMap.value(lc.remoteId, "");
+            QString personJson = buildPersonJson(lc, etag);
+
+            QString resId = lc.remoteId;
+            if (!resId.startsWith("people/")) resId = "people/" + resId;
+
+            contactsJsonMap.append("\"" + resId + "\": " + personJson);
+        }
+
+        // ВАЖНО: Для update нужна и updateMask, и readMask (если мы хотим получить ответ)
+        QString reqJson = "{"
+                "\"contacts\": {" + contactsJsonMap.join(",") + "},"
+                "\"updateMask\": \"names,phoneNumbers,emailAddresses,addresses,organizations,birthdays,biographies\","
+                "\"readMask\": \"names,phoneNumbers\"" // Чтобы ответ не был пустым {}
+                "}";
+
+        QByteArray data = reqJson.toUtf8();
+        QBuffer *buffer = new QBuffer();
+        buffer->setData(data);
+        buffer->open(QIODevice::ReadOnly);
+
+        QNetworkReply *reply = net.post(req, buffer);
+        QString response = syncWait(reply);
+        buffer->deleteLater();
+
+        if (reply->error() == QNetworkReply::NoError) {
+            successCount += (end - i);
+        } else {
+            qDebug() << "[ERROR] Batch Update Failed:" << response;
+        }
+        reply->deleteLater();
+    }
+    return successCount;
 }
 
 void SyncThread::executeSync(const QString &accessToken)
@@ -621,6 +829,105 @@ void SyncThread::executeSync(const QString &accessToken)
     QList<LocalContact> existingContacts;
     readSymbianContacts(existingContacts, db);
 
+    // =====================================================================
+    // ФАЗА 0: ПОИСК И ОБЪЕДИНЕНИЕ ЛОКАЛЬНЫХ ДУБЛИКАТОВ (DEDUPLICATION)
+    // =====================================================================
+
+    emit m_parent->progressUpdated("Поиск дубликатов...");
+    QList<LocalContact> deduplicatedContacts;
+    QList<long> duplicateSymbianIdsToDelete;
+    QList<QString> cloudDuplicatesToDelete;
+    QList<LocalContact> mergedContactsToSave; // НОВЫЙ СПИСОК: контакты, которые нужно сохранить
+
+    for (int i = 0; i < existingContacts.size(); ++i) {
+        LocalContact current = existingContacts[i];
+        if (current.symbianId == -1) continue;
+
+        bool wasMerged = false; // Флаг: склеивали ли мы этот контакт?
+
+        for (int j = i + 1; j < existingContacts.size(); ++j) {
+            LocalContact &other = existingContacts[j];
+            if (other.symbianId == -1) continue;
+
+            if ((!current.firstName.isEmpty() || !current.lastName.isEmpty()) &&
+                    current.firstName.compare(other.firstName, Qt::CaseInsensitive) == 0 &&
+                    current.lastName.compare(other.lastName, Qt::CaseInsensitive) == 0)
+            {
+                qDebug() << "[MERGE] Объединяем дубликат:" << current.firstName << current.lastName;
+                wasMerged = true;
+
+                // 1. Разрешение RemoteId
+                if (current.remoteId.isEmpty() && !other.remoteId.isEmpty()) {
+                    current.remoteId = other.remoteId;
+                }
+                else if (!current.remoteId.isEmpty() && !other.remoteId.isEmpty() && current.remoteId != other.remoteId) {
+                    // Удаляем лишний клон из Google
+                    cloudDuplicatesToDelete.append(other.remoteId);
+                }
+
+                // 2. Объединение списков (БЕЗ ПОТЕРЬ)
+                foreach(QString p, other.phones) { if (!current.phones.contains(p)) current.phones.append(p); }
+                foreach(QString e, other.emails) { if (!current.emails.contains(e)) current.emails.append(e); }
+                foreach(QString a, other.addresses) { if (!current.addresses.contains(a)) current.addresses.append(a); }
+                foreach(QString u, other.urls) { if (!current.urls.contains(u)) current.urls.append(u); }
+
+                // 3. Объединение одиночных полей
+                if (current.company.isEmpty()) current.company = other.company;
+                if (current.jobTitle.isEmpty()) current.jobTitle = other.jobTitle;
+                if (current.birthday.isEmpty()) current.birthday = other.birthday;
+
+                if (current.notes.isEmpty()) {
+                    current.notes = other.notes;
+                } else if (!other.notes.isEmpty() && current.notes != other.notes) {
+                    current.notes += "\n---\n" + other.notes;
+                }
+
+                duplicateSymbianIdsToDelete.append(other.symbianId);
+                other.symbianId = -1; // Метка "Удален"
+            }
+        }
+
+        // Если контакт вобрал в себя данные дубликатов, его ОБЯЗАТЕЛЬНО нужно обновить в телефоне
+        if (wasMerged) {
+            mergedContactsToSave.append(current);
+        }
+
+        deduplicatedContacts.append(current);
+    }
+
+    existingContacts = deduplicatedContacts;
+
+    // Сначала удаляем клоны из телефона
+    if (!duplicateSymbianIdsToDelete.isEmpty()) {
+        qDebug() << "[MERGE] Удаление" << duplicateSymbianIdsToDelete.size() << "дубликатов из телефона...";
+        deleteSymbianContacts(duplicateSymbianIdsToDelete, db);
+    }
+
+    // ЗАТЕМ СОХРАНЯЕМ РЕЗУЛЬТАТ СКЛЕЙКИ В ТЕЛЕФОН (Именно этого не хватало!)
+    if (!mergedContactsToSave.isEmpty()) {
+        qDebug() << "[MERGE] Сохранение объединенных контактов в базу телефона...";
+        saveSymbianContacts(mergedContactsToSave, db);
+    }
+
+    // Удаляем дубликаты из Google (как было)
+    if (!cloudDuplicatesToDelete.isEmpty()) {
+        emit m_parent->progressUpdated("Очистка дубликатов в облаке...");
+        for (int i = 0; i < cloudDuplicatesToDelete.size(); ++i) {
+            QString dupId = cloudDuplicatesToDelete[i];
+            deleteGoogleContact(accessToken, dupId);
+
+            for (int k = 0; k < googleContacts.size(); ++k) {
+                if (googleContacts[k].id == dupId) {
+                    googleContacts.removeAt(k);
+                    break;
+                }
+            }
+        }
+    }
+    // =====================================================================
+
+
+
     int uploadedCount = 0, downloadedCount = 0, localDeletedCount = 0, cloudDeletedCount = 0;
 
     // === ФАЗА 1: УДАЛЕНИЕ ИЗ GOOGLE (Если контакт удален локально) ===
@@ -647,21 +954,43 @@ void SyncThread::executeSync(const QString &accessToken)
 
     // === ФАЗА 2: УДАЛЕНИЕ ИЗ ТЕЛЕФОНА (Если контакт удален в Google) ===
     emit m_parent->progressUpdated("Проверка удаленных контактов (2/4)...");
+    emit m_parent->progressUpdated("Проверка удаленных контактов (2/4)...");
     QList<long> toDeleteLocally;
-    for (int i = 0; i < existingContacts.size(); ++i) {
-        if (!existingContacts[i].remoteId.isEmpty() && !currentCloudEtags.contains(existingContacts[i].remoteId)) {
-            qDebug() << "[-] Удаление локально (пропал из Google):" << existingContacts[i].firstName;
-            toDeleteLocally.append(existingContacts[i].symbianId);
-            localDeletedCount++;
+
+    // Идем с конца в начало, так как мы будем удалять элементы из списка existingContacts
+    for (int i = existingContacts.size() - 1; i >= 0; --i) {
+        QString rId = existingContacts[i].remoteId;
+
+        if (!rId.isEmpty() && !currentCloudEtags.contains(rId)) {
+            // Контакта нет в текущем Google-аккаунте.
+            // Проверяем: а мы его вообще когда-нибудь видели в ЭТОМ аккаунте?
+            if (state.etags.contains(rId)) {
+                // Да, он был в нашей "памяти", но теперь в облаке его нет -> Удален.
+                qDebug() << "[-] Удаление локально (пропал из Google):" << existingContacts[i].firstName;
+                toDeleteLocally.append(existingContacts[i].symbianId);
+                existingContacts.removeAt(i); // Убираем из массива, чтобы Фаза 3 его не трогала
+                localDeletedCount++;
+            } else {
+                // Нет, в памяти этого аккаунта его нет!
+                // Это чужой бэкап (или контакты из другого аккаунта).
+                // Стираем ему старый GID, чтобы Фаза 4 загрузила его в новый аккаунт.
+                qDebug() << "[*] Обнаружен чужой бэкап. Сброс GID для:" << existingContacts[i].firstName;
+                existingContacts[i].remoteId = "";
+                // Мы оставляем его в existingContacts. В Фазе 4 он будет обработан как новый.
+            }
         }
     }
     if (!toDeleteLocally.isEmpty()) deleteSymbianContacts(toDeleteLocally, db);
 
     QList<LocalContact> contactsToSaveToPhone;
 
+    QList<int> indicesToUpdateInGoogle;
+    QList<int> indicesToCreateInGoogle;
+
     // === ФАЗА 3: СИНХРОНИЗАЦИЯ И РАЗРЕШЕНИЕ КОНФЛИКТОВ ===
     for (int i = 0; i < googleContacts.size(); ++i) {
         GoogleContact &gc = googleContacts[i];
+        emit m_parent->progressUpdated(QString("Синхронизация... %1/%2").arg(i+1).arg(googleContacts.size()));
 
         LocalContact* lc = NULL;
         for (int j = 0; j < existingContacts.size(); ++j) {
@@ -679,58 +1008,33 @@ void SyncThread::executeSync(const QString &accessToken)
             QString lastHash = state.hashes.value(gc.id, "");
             QString lastEtag = state.etags.value(gc.id, "");
 
-            // 1. Проверяем изменения
-            bool cloudChanged = false;
-            if (!lastEtag.isEmpty() && gc.etag != lastEtag) cloudChanged = true;
+            bool isFirstSync = lastHash.isEmpty();
+            bool cloudChanged = !isFirstSync && gc.etag != lastEtag;
+            bool localChanged = !isFirstSync && localHash != lastHash;
 
-            bool localChanged = false;
-            if (!lastHash.isEmpty() && localHash != lastHash) localChanged = true;
-
-            // Если хэши идентичны — никто не менялся
-            if (googleHash == localHash) {
-                cloudChanged = false;
-                localChanged = false;
-            }
-
-            // РАЗРЕШЕНИЕ КОНФЛИКТОВ
-            if (lastHash.isEmpty()) {
-                // Первая синхронизация этого контакта (связывание).
-                applyGoogleDataToLocal(gc, *lc);
-                newHashes[gc.id] = calculateHashLocal(*lc);
-
-                // ВАЖНО: Добавляем в список на сохранение в телефон
-                contactsToSaveToPhone.append(*lc);
-            }
-            else if (localChanged && !cloudChanged) {
-                // Изменился ТОЛЬКО телефон -> UPLOAD (Отправляем в Google)
-                qDebug() << "[^] Upload: Отправка локальных изменений в Google для" << lc->firstName;
-                if (updateGoogleContact(accessToken, *lc, gc.etag)) {
-                    newHashes[gc.id] = localHash;
-                    uploadedCount++;
-                } else {
-                    newHashes[gc.id] = lastHash;
-                }
-            }
-            else if (cloudChanged) {
-                // Изменился Google -> DOWNLOAD (Сохраняем в телефон)
+            if (isFirstSync || cloudChanged) {
                 qDebug() << "[!] Download: Обновление из Google для" << gc.firstName;
                 applyGoogleDataToLocal(gc, *lc);
                 newHashes[gc.id] = calculateHashLocal(*lc);
-                downloadedCount++;
 
-                // ВАЖНО: Добавляем в список на сохранение в телефон
-                contactsToSaveToPhone.append(*lc);
+                contactsToSaveToPhone.append(*lc); // <--- ВАЖНО: Добавляем в очередь на сохранение
+            } else if (localChanged) {
+                qDebug() << "[^] Upload: Отправка изменений в Google для" << lc->firstName;
+                /*if (updateGoogleContact(accessToken, *lc, gc.etag)) {
+                        newHashes[gc.id] = localHash;
+                        uploadedCount++;
+                    } else {
+                        newHashes[gc.id] = lastHash;
+                    }*/
+                indicesToUpdateInGoogle.append(i);
+            } else {
+                newHashes[gc.id] = localHash; // Ничего не менялось
             }
-            else {
-                // НИКТО НЕ МЕНЯЛСЯ. Мы ничего не отправляем в Google и НЕ сохраняем в телефон!
-                newHashes[gc.id] = localHash;
-            }
-
             newEtags[gc.id] = gc.etag;
         }
         else
         {
-            // НОВЫЙ КОНТАКТ ИЗ GOOGLE -> DOWNLOAD (Сохраняем в телефон)
+            // НОВЫЙ КОНТАКТ ИЗ GOOGLE
             qDebug() << "[+] Download: Создание нового контакта" << gc.firstName;
             LocalContact newLc;
             newLc.symbianId = 0;
@@ -738,9 +1042,7 @@ void SyncThread::executeSync(const QString &accessToken)
             applyGoogleDataToLocal(gc, newLc);
 
             existingContacts.append(newLc);
-
-            // ВАЖНО: Добавляем в список на сохранение в телефон
-            contactsToSaveToPhone.append(newLc);
+            contactsToSaveToPhone.append(newLc); // <--- ВАЖНО: Добавляем в очередь на создание
 
             newHashes[gc.id] = calculateHashLocal(newLc);
             newEtags[gc.id] = gc.etag;
@@ -749,30 +1051,46 @@ void SyncThread::executeSync(const QString &accessToken)
     }
 
     // === ФАЗА 4: ВЫГРУЗКА НОВЫХ ЛОКАЛЬНЫХ КОНТАКТОВ ===
+
     emit m_parent->progressUpdated("Выгрузка новых контактов в Google...");
-    QList<LocalContact> toCreateInGoogle;
     for(int i=0; i<existingContacts.size(); ++i) {
         if (existingContacts[i].remoteId.isEmpty()) {
-            qDebug() << "[^] Upload: Новый локальный контакт" << existingContacts[i].firstName;
-            QString newId = createGoogleContact(existingContacts[i], accessToken);
-            if (!newId.isEmpty()) {
-                existingContacts[i].remoteId = newId;
-                newHashes[newId] = calculateHashLocal(existingContacts[i]);
-                contactsToSaveToPhone.append(existingContacts[i]);
-                uploadedCount++;
+            indicesToCreateInGoogle.append(i);
+        }
+    }
+
+    if (!indicesToUpdateInGoogle.isEmpty()) {
+        emit m_parent->progressUpdated(QString("Пакетное обновление %1 контактов в Google...").arg(indicesToUpdateInGoogle.size()));
+        uploadedCount += batchUpdateGoogleContacts(accessToken, existingContacts, indicesToUpdateInGoogle, state.etags);
+
+        // После успешного обновления, записываем новые хеши в память
+        foreach(int idx, indicesToUpdateInGoogle) {
+            newHashes[existingContacts[idx].remoteId] = calculateHashLocal(existingContacts[idx]);
+        }
+    }
+
+    if (!indicesToCreateInGoogle.isEmpty()) {
+        emit m_parent->progressUpdated(QString("Пакетное создание %1 новых контактов в Google...").arg(indicesToCreateInGoogle.size()));
+        int createdCount = batchCreateGoogleContacts(accessToken, existingContacts, indicesToCreateInGoogle);
+        uploadedCount += createdCount;
+
+        // Если контакты успешно созданы, у них появился RemoteId.
+        // Мы должны сохранить их обратно в базу Symbian (чтобы прописать [GID:...])
+        foreach(int idx, indicesToCreateInGoogle) {
+            if (!existingContacts[idx].remoteId.isEmpty()) {
+                contactsToSaveToPhone.append(existingContacts[idx]);
+                newHashes[existingContacts[idx].remoteId] = calculateHashLocal(existingContacts[idx]);
             }
         }
     }
 
+    // Финальная запись ТОЛЬКО ИЗМЕНЕНИЙ в телефонную книгу
     if (!contactsToSaveToPhone.isEmpty()) {
-        emit m_parent->progressUpdated("Сохранение изменений в телефон...");
+        emit m_parent->progressUpdated(QString("Сохранение в телефон (%1 шт)...").arg(contactsToSaveToPhone.size()));
         saveSymbianContacts(contactsToSaveToPhone, db);
     } else {
         qDebug() << "[SAVE] Нет изменений для сохранения в телефон.";
     }
-
-    // Финальная запись ВСЕХ изменений в телефонную книгу
-    emit m_parent->progressUpdated("Сохранение в телефон...");
 
     CleanupStack::PopAndDestroy(db);
     emit m_parent->progressUpdated("Сохранение состояния...");
@@ -906,13 +1224,13 @@ void SyncThread::readSymbianContacts(QList<LocalContact> &list, CContactDatabase
           qDebug() << "[READ] Открытие CContactDatabase...";
             //  CContactDatabase* db = NULL;
             /* TRAPD(openErr, db = CContactDatabase::OpenL());
-                                    if (openErr == KErrNotFound) {
-                                        qDebug() << "[READ] База не найдена, создаем новую...";
-                                        db = CContactDatabase::CreateL();
-                                    } else {
-                                        User::LeaveIfError(openErr);
-                                    }
-                                    CleanupStack::PushL(db);*/
+                                                                    if (openErr == KErrNotFound) {
+                                                                        qDebug() << "[READ] База не найдена, создаем новую...";
+                                                                        db = CContactDatabase::CreateL();
+                                                                    } else {
+                                                                        User::LeaveIfError(openErr);
+                                                                    }
+                                                                    CleanupStack::PushL(db);*/
 
             qDebug() << "[READ] Создание итератора...";
     TContactIter iter(*aDb);
@@ -1116,51 +1434,67 @@ QString SyncThread::createGoogleContact(const LocalContact &lc, const QString &a
 
 #define SET_SINGLE_FIELD(FieldUid, VcardMap, Value) \
 { \
-    int fIdx = -1; \
-    for (int k = 0; k < fieldSet.Count(); ++k) { \
-    const CContentType* cType = &fieldSet[k].ContentType(); \
-    if (cType->ContainsFieldType(FieldUid)) { fIdx = k; break; } \
+    CContactItemField* targetField = NULL; \
+    int firstFoundIdx = -1; \
+    /* 1. Ищем существующее поле и удаляем дубликаты, если старая прога их наплодила */ \
+    for (int k = fieldSet.Count() - 1; k >= 0; --k) { \
+        if (fieldSet[k].ContentType().ContainsFieldType(FieldUid)) { \
+            if (firstFoundIdx == -1) { \
+                firstFoundIdx = k; \
+                targetField = &fieldSet[k]; \
+            } else { \
+                /* Если нашли второе такое же поле (дубликат имени/заметки) - удаляем его */ \
+                item->RemoveField(k); \
+            } \
+        } \
     } \
     if (Value.isEmpty()) { \
-    if (fIdx != -1) fieldSet[fIdx].TextStorage()->SetTextL(KNullDesC); \
+        if (targetField) item->RemoveField(firstFoundIdx); \
     } else { \
-    if (fIdx != -1) { \
-    fieldSet[fIdx].TextStorage()->SetTextL(ToSymbianStr(Value)); \
-    } else { \
-    CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
-    f->AddFieldTypeL(FieldUid); \
-    f->SetMapping(VcardMap); \
-    f->TextStorage()->SetTextL(ToSymbianStr(Value)); \
-    item->AddFieldL(*f); \
-    CleanupStack::Pop(f); \
+        if (targetField) { \
+            targetField->TextStorage()->SetTextL(ToSymbianStr(Value)); \
+        } else { \
+            CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
+            f->AddFieldTypeL(FieldUid); \
+            f->SetMapping(VcardMap); \
+            f->TextStorage()->SetTextL(ToSymbianStr(Value)); \
+            item->AddFieldL(*f); \
+            CleanupStack::Pop(f); \
+        } \
     } \
-    } \
-    }
+}
 
 #define SET_MULTI_FIELD(FieldUid, VcardMap, ValuesList) \
 { \
     QList<int> existIdx; \
+    /* 1. Собираем индексы существующих полей этого типа */ \
     for (int k = 0; k < fieldSet.Count(); ++k) { \
-    const CContentType* cType = &fieldSet[k].ContentType(); \
-    if (cType->ContainsFieldType(FieldUid)) { existIdx.append(k); } \
+        if (fieldSet[k].ContentType().ContainsFieldType(FieldUid)) { \
+            existIdx.append(k); \
+        } \
     } \
     int minC = qMin(existIdx.size(), ValuesList.size()); \
+    /* 2. Обновляем существующие поля */ \
     for (int i = 0; i < minC; ++i) { \
-    fieldSet[existIdx[i]].TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
+        fieldSet[existIdx[i]].TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
     } \
+    /* 3. Если в новом списке значений больше - добавляем новые поля */ \
     for (int i = minC; i < ValuesList.size(); ++i) { \
-    CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
-    f->AddFieldTypeL(FieldUid); \
-    f->SetMapping(VcardMap); \
-    f->TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
-    item->AddFieldL(*f); \
-    CleanupStack::Pop(f); \
+        CContactItemField* f = CContactItemField::NewLC(KStorageTypeText); \
+        f->AddFieldTypeL(FieldUid); \
+        f->SetMapping(VcardMap); \
+        f->TextStorage()->SetTextL(ToSymbianStr(ValuesList[i])); \
+        item->AddFieldL(*f); \
+        CleanupStack::Pop(f); \
     } \
-    for (int i = minC; i < existIdx.size(); ++i) { \
-    fieldSet[existIdx[i]].TextStorage()->SetTextL(KNullDesC); \
+    /* 4. Если в телефоне полей БОЛЬШЕ, чем пришло сейчас - УДАЛЯЕМ лишние (а не нуллим) */ \
+    /* Удаляем с конца, чтобы не поплыли индексы массива */ \
+    if (existIdx.size() > ValuesList.size()) { \
+        for (int i = existIdx.size() - 1; i >= minC; --i) { \
+            item->RemoveField(existIdx[i]); \
+        } \
     } \
-    }
-
+}
 
 // =======================================================================
 // ГЛАВНАЯ ФУНКЦИЯ СОХРАНЕНИЯ
