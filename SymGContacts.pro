@@ -18,11 +18,10 @@ QT += core gui network script declarative
 TARGET = GoogleSync
 TEMPLATE = app
 
-SOURCES += main.cpp syncmanager.cpp \
-    localsslproxy.cpp
+SOURCES += main.cpp syncmanager.cpp
 HEADERS += \
-    syncmanager.h \
-    localsslproxy.h
+    syncmanager.h
+
 OTHER_FILES += startup.rss
 
 INCLUDEPATH += $$PWD
