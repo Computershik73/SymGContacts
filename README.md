@@ -1,5 +1,7 @@
 # SymGContacts
 
+[Readme на русском](https://github.com/Computershik73/SymGContacts/blob/main/README.ru.md)
+
 **SymGContacts** is a full-featured client for two-way synchronization of Google Contacts for devices running Symbian OS (S60 3rd Edition Feature Pack 1, 5th Edition, Symbian^3 / Anna / Belle).
 
 The project was developed in 2026 and proves that Symbian can still work with modern cloud services. The application uses the up-to-date **Google People API (+OAuth 2.0)** and directly interacts with the Symbian system contact database (`cntmodel.lib`), ensuring reliable operation without relying on outdated or discontinued services (such as Mail for Exchange or SyncML).
