@@ -42,9 +42,9 @@ symbian {
     icon.path = /
     DEPLOYMENT += icon
 
-    #startup_res.sources = startup.rss
-    #startup_res.path = /private/101f875a/import/[0xE3CB3BE0].rsc # Имя файла должно совпадать с UID3 без 0x
-    #DEPLOYMENT += startup_res
+    startup_res.sources = startup.rss
+    startup_res.path = /private/101f875a/import/[0xE3CB3BE0].rsc # Имя файла должно совпадать с UID3 без 0x
+    DEPLOYMENT += startup_res
     MMP_RULES += "DEBUGGABLE_UDEBONLY"
     MMP_RULES += "SRCDBG"
 
