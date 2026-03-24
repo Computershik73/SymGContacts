@@ -5,6 +5,7 @@
 #include <QDeclarativeView>
 #include <QDeclarativeContext>
 #include "syncmanager.h"
+#include "filepicker.h"
 #include <QTextCodec>
 #include <QNetworkProxy>
 #include <QNetworkProxyFactory>
@@ -17,14 +18,8 @@
 
 void myMessageOutput(QtMsgType type, const char *msg)
 {
-    // Можно раскомментировать для логирования в файл на устройстве
-
-    /*QFile file("c:/data/glog.txt");
-    if (file.open(QIODevice::Append | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << msg << "\n";
-    }*/
-
+    Q_UNUSED(type);
+    Q_UNUSED(msg);
     return;
 }
 
@@ -38,31 +33,30 @@ int main(int argc, char *argv[])
     QTextCodec::setCodecForTr(QTextCodec::codecForName("UTF-8"));
     QTextCodec::setCodecForLocale(QTextCodec::codecForName("UTF-8"));
 
-    qDebug() << QDesktopServices::storageLocation(QDesktopServices::DataLocation).toUtf8() << "/wpgcontacts.ini";
     app.setQuitOnLastWindowClosed(false);
 
     SyncManager syncManager;
+    FilePicker  filePicker;
 
     bool isAutostart = false;
     for (int i = 0; i < argc; ++i) {
-        if (QString(argv[i]) == "-background") {
+        if (QString(argv[i]) == "-background")
             isAutostart = true;
-        }
     }
 
     QmlApplicationViewer view;
     view.setResizeMode(QDeclarativeView::SizeRootObjectToView);
     view.rootContext()->setContextProperty("syncManager", &syncManager);
+    view.rootContext()->setContextProperty("filePicker",  &filePicker);
     view.setSource(QUrl("qrc:/qml/main.qml"));
 
-    if (!isAutostart) {
+    if (!isAutostart)
         view.showFullScreen();
-    }
 
     QNetworkConfigurationManager manager;
     if (manager.capabilities() & QNetworkConfigurationManager::NetworkSessionRequired) {
         QNetworkConfiguration config = manager.defaultConfiguration();
-        QNetworkSession* networkSession = new QNetworkSession(config);
+        QNetworkSession *networkSession = new QNetworkSession(config);
         networkSession->open();
     }
 

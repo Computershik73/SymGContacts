@@ -15,12 +15,11 @@ QML_IMPORT_PATH =
 
 QT += core gui network script declarative
 
-TARGET = GoogleSync
+TARGET = SymGContacts
 TEMPLATE = app
 
-SOURCES += main.cpp syncmanager.cpp
-HEADERS += \
-    syncmanager.h
+SOURCES += main.cpp syncmanager.cpp filepicker.cpp
+HEADERS += syncmanager.h filepicker.h
 
 OTHER_FILES += startup.rss
 
@@ -33,37 +32,19 @@ INCLUDEPATH += $$EPOCROOT/epoc32/include/app
 INCLUDEPATH += $$EPOCROOT/epoc32/include/platform
 
 symbian {
-    TARGET.UID3 = 0xE3CB3BE0 # Замените на ваш UID
-    #TARGET.CAPABILITY = ReadUserData WriteUserData NetworkServices ReadDeviceData WriteDeviceData
-TARGET.CAPABILITY = NetworkServices
-    TARGET.CAPABILITY += LocalServices
-    TARGET.CAPABILITY += Location
-    TARGET.CAPABILITY += UserEnvironment
-    TARGET.CAPABILITY += SwEvent
-    TARGET.CAPABILITY +=  SurroundingsDD
-    TARGET.CAPABILITY +=  ProtServ
-    TARGET.CAPABILITY +=  PowerMgmt
-    TARGET.CAPABILITY +=  ReadDeviceData
-    TARGET.CAPABILITY +=  WriteDeviceData
-    TARGET.CAPABILITY +=  TrustedUI
-    TARGET.CAPABILITY +=  NetworkControl
-    TARGET.CAPABILITY +=  MultimediaDD
-    TARGET.CAPABILITY +=  CommDD
-    TARGET.CAPABILITY +=  DiskAdmin
-    #load(data_caging_paths)
-    TARGET.CAPABILITY += ReadUserData
-    TARGET.CAPABILITY += WriteUserData
+    TARGET.UID3 = 0xE3CB3BE0
+    TARGET.CAPABILITY = NetworkServices ReadUserData WriteUserData
 
     TARGET.EPOCHEAPSIZE = 0x40000 0x4000000
 
-    # Подключаем нативные библиотеки Symbian для работы с контактами
     LIBS +=  -lcntmodel -leuser -lbafl -lmbedtls
-    #-lPbkEng
+    icon.files = SymGContacts.png
+    icon.path = /
+    DEPLOYMENT += icon
 
-    # Настройка автозапуска (копирование RSS файла в системную папку загрузки)
-    startup_res.sources = startup.rss
-    startup_res.path = /private/101f875a/import/[0xE3CB3BE0].rsc # Имя файла должно совпадать с UID3 без 0x
-    DEPLOYMENT += startup_res
+    #startup_res.sources = startup.rss
+    #startup_res.path = /private/101f875a/import/[0xE3CB3BE0].rsc # Имя файла должно совпадать с UID3 без 0x
+    #DEPLOYMENT += startup_res
     MMP_RULES += "DEBUGGABLE_UDEBONLY"
     MMP_RULES += "SRCDBG"
 
